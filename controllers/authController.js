@@ -7,6 +7,7 @@ import { sendOtpService } from "../services/sendOtpService.js"
 import redisClient from "../config/redis.js";
 import { sendOtpSchema, verifyOtpSchema } from "../validators/authSchema.js";
 import { enforceDeviceLimit, createSession } from "../utils/sessionUtils.js";
+import { isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
 
 
 const expiryTime = 1000 * 60 * 60 * 24 * 7;
@@ -68,7 +69,11 @@ export const loginWithGoogle = async (req, res, next) => {
             }
             await enforceDeviceLimit(user.id, user.accessDevice);
 
-            if (!user.picture.includes("googleusercontent.com")) {
+            // Same behavior as before (only refresh from Google when the
+            // stored picture isn't already a Google picture), PLUS: never
+            // overwrite a custom (self-uploaded) R2 profile picture.
+            const hasCustomPicture = isOwnedProfilePictureURL(user.picture, user._id.toString());
+            if (!hasCustomPicture && !user.picture.includes("googleusercontent.com")) {
                 user.picture = picture
                 await user.save()
             }

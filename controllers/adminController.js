@@ -4,7 +4,7 @@ import Directory from "../models/directoryModel.js";
 import File from "../models/fileModel.js";
 import Subscription from "../models/subscriptionModel.js";
 import User from "../models/userModel.js";
-import { deleteR2Files } from "../services/cloudflareR2Service.js";
+import { deleteR2Files, deleteProfilePicture, getProfilePictureKeyFromURL, isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
 import { getTargetUser } from "../utils/getTargetUser.js";
 import { isPremiumActive } from "../utils/isPremiumActive.js";
 import { canAssignRole } from "../utils/permissions.js";
@@ -114,6 +114,14 @@ export const hardDelete = async (req, res) => {
     if (keys.length) {
         await deleteR2Files(keys);
     }
+
+    if (isOwnedProfilePictureURL(target.picture, userId)) {
+        const key = getProfilePictureKeyFromURL(target.picture);
+        await deleteProfilePicture({ key }).catch((err) => {
+            console.error("Failed to delete profile image during admin hard-delete:", key, err);
+        });
+    }
+
     await Promise.all([
         File.deleteMany({ userId }),
         deleteUserSessions(userId),

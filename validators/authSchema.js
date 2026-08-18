@@ -47,6 +47,17 @@ export const changePasswordSchema = z
     message: "Passwords do not match.",
   });
 
+export const updateProfileSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(3, "Name must be at least 3 characters")
+      .max(50, "Name cannot exceed 50 characters")
+      .optional(),
+  })
+  .strict();
+
 export const roleSchema = z.object({
   role: z.enum(["User", "Manager", "Admin"], {
     error: "Please enter valid role!",
