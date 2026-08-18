@@ -32,6 +32,7 @@
     "razorpay": "^2.9.6",
     "redis": "^5.12.1",
     "resend": "^6.12.3",
+    "serverless-http": "^4.0.0",
     "sharp": "^0.35.3",
     "zod": "^4.4.3"
   }
