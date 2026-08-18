@@ -25,7 +25,7 @@ jobs:
           cache: npm
 
       - name: Install production dependencies
-        run: npm ci
+        run: npm i
 
       - name: Create Lambda deployment package
         run: |
