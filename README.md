@@ -7,7 +7,8 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 - **Node.js** (ESM) + **Express 5** — HTTP server and routing
 - **MongoDB** + **Mongoose** — primary data store
 - **Redis** — session storage (via `redis` client, JSON module)
-- **Cloudflare R2** (`@aws-sdk/client-s3`, S3-compatible API) — file storage, with presigned URLs for direct client uploads
+- **Cloudflare R2** (`@aws-sdk/client-s3`, S3-compatible API) — file storage, with presigned URLs for direct client uploads; a second, dedicated public R2 bucket + Cloudflare CDN domain serves profile images
+- **multer** + **sharp** (+ **heic-convert** for iPhone HEIC/HEIF uploads) — profile picture upload handling and normalization to WebP
 - **Google Auth Library** — Google OAuth login
 - **Razorpay** — subscription billing, checkout, and webhooks
 - **Resend** — transactional email (OTP delivery)
@@ -90,7 +91,7 @@ All routes are mounted in `app.js`. Most are prefixed as shown; `userRoutes` and
 | Mount | Router | Auth required |
 |---|---|---|
 | `/webhook` | `webhookRoutes` | Signature-verified, not session-based |
-| `/` | `userRoutes` (`/user/register`, `/user/login`, `/user/logout`, `/user/logout-all`, `/user`, `/user/change-password`, `/user/soft-delete`, `/user/hard-delete`, `/user/bulk-delete`) | Mixed — login/register public, rest require session |
+| `/` | `userRoutes` (`/user/register`, `/user/login`, `/user/logout`, `/user/logout-all`, `/user`, `/user/change-password`, `/user/update-profile`, `/user/soft-delete`, `/user/hard-delete`, `/user/bulk-delete`) | Mixed — login/register public, rest require session |
 | `/auth` | `authRoutes` (`/send-otp`, `/verify-otp`, `/google`) | Public, rate-limited |
 | `/file` | `fileRoutes` | Session required |
 | `/directory` | `directoryRoutes` | Session required |
@@ -137,11 +138,15 @@ GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 REDIRECT_URI=http://localhost:5173/auth/google/callback
 
-# Cloudflare R2
+# Cloudflare R2 — PRIVATE bucket (existing user files, stays private)
 R2_BUCKET=your-bucket-name
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=your-r2-access-key-id
 R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
+
+# Cloudflare R2 — PUBLIC profile-image bucket (separate bucket + CDN domain)
+R2_PROFILE_BUCKET_NAME=your-profile-picture-bucket-name
+R2_PROFILE_PUBLIC_URL=your-custom-domain-bucket-url
 
 # Razorpay
 RAZORPAY_KEY_ID=your-razorpay-key-id
@@ -193,7 +198,28 @@ Uploads are direct-to-R2, not proxied through the API:
 3. `POST /file/:upload/complete` — server confirms the object exists in R2 and finalizes the file record (updates storage usage).
 4. `POST /file/:upload/cancel` — discards a pending upload if the client aborts.
 
-This keeps large file transfers off the API server entirely.
+This keeps large file transfers off the API server entirely. It is completely separate from, and unaffected by, the profile-picture system below.
+
+## Profile Pictures
+
+Unlike normal files, profile pictures are proxied through the API (not direct-to-R2) and live in their own, deliberately **public** R2 bucket — kept fully separate from the private user-files bucket.
+
+- `PATCH /user/update-profile` (session required, `multipart/form-data`, rate-limited) accepts an optional `name` and an optional `picture` file. At least one must be provided.
+- Uploaded images are validated and decoded server-side with `sharp` (HEIC/HEIF from iPhones is converted first via `heic-convert` if the installed `sharp`/libvips build can't decode it directly), then normalized to a `512x512` `image/webp` buffer. The original uploaded file is never stored.
+- The processed image is uploaded to `R2_PROFILE_BUCKET_NAME` under a unique, non-guessable key: `profile-images/{userId}/{uuid}.webp`, with `Cache-Control: public, max-age=31536000, immutable`. Every upload gets a brand-new key/URL — old URLs are never reused or overwritten, so there's no CDN cache to invalidate.
+- `user.picture` is only updated in MongoDB **after** the new object is confirmed uploaded. The previous custom image (if any) is deleted afterward, and only if it's verified to belong to that same user's own `profile-images/{userId}/` namespace on the profile bucket — the default avatar and Google-hosted avatars are never touched.
+- Google Sign-In no longer overwrites a custom profile picture the user has uploaded; it only sets/refreshes the picture when the stored value isn't already a self-uploaded R2 image.
+- Profile pictures are application-managed assets, not Drive files — they never touch `usedStorageInBytes`/quota accounting.
+- Self and admin hard-delete both clean up a user's custom profile image from the profile bucket (soft delete leaves it untouched, since the account may be restored).
+
+### Cloudflare setup for the profile-image bucket
+
+1. Create a **new, separate** R2 bucket for profile images (e.g. `haadi-profile-images`) — do not reuse the private storage bucket.
+2. Leave the existing private bucket's access settings untouched.
+3. Attach a Cloudflare custom domain (e.g. `cdn.mirhaadi.in`) to the **new** profile bucket only, and confirm DNS/HTTPS resolve correctly.
+4. Set `R2_PROFILE_BUCKET_NAME` to the new bucket's name.
+5. Set `R2_PROFILE_PUBLIC_URL` to the custom domain, e.g. `https://cdn.mirhaadi.in`.
+6. Do not attach the profile CDN domain to the private bucket, and do not enable public access on the private bucket.
 
 ## Known Limitations / In Progress
 

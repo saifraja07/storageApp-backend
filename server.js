@@ -17,27 +17,6 @@ import { connectDB } from "./config/db.js";
 import { cleanupUploads } from "./utils/cleanupUploads.js";
 import { runSubscriptionExpiryJob } from "./jobs/subscriptionCron.js";
 
-const PORT = process.env.PORT || 4000;
-
-await connectDB();
-
-setInterval(async () => {
-  try {
-    await cleanupUploads();
-  } catch (err) {
-    console.error(err);
-  }
-}, 60 * 60 * 1000);
-
-setTimeout(async () => {
-  try { await runSubscriptionExpiryJob(); }
-  catch (err) { console.error("[cron] initial run error:", err); }
-
-  setInterval(async () => {
-    try { await runSubscriptionExpiryJob(); }
-    catch (err) { console.error("[cron] error:", err); }
-  }, 24 * 60 * 60 * 1000);
-}, 30 * 1000); // 30-second warm-up delay
 
 const app = express();
 app.use(helmet());
@@ -80,6 +59,32 @@ app.use((err, req, res, next) => {
   return res.status(err.status || 500).json({ error: "Something went wrong! try again later." });
 });
 
-app.listen(PORT, () => {
-  console.log("Server Started");
-});
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  await connectDB();
+
+  setInterval(async () => {
+    try {
+      await cleanupUploads();
+    } catch (err) {
+      console.error(err);
+    }
+  }, 60 * 60 * 1000);
+
+  setTimeout(async () => {
+    try { await runSubscriptionExpiryJob(); }
+    catch (err) { console.error("[cron] initial run error:", err); }
+
+    setInterval(async () => {
+      try { await runSubscriptionExpiryJob(); }
+      catch (err) { console.error("[cron] error:", err); }
+    }, 24 * 60 * 60 * 1000);
+  }, 30 * 1000); // 30-second warm-up delay
+
+  const PORT = process.env.PORT;
+
+  app.listen(PORT, () => {
+    console.log("Server Started");
+  });
+}
+
+export default app;

@@ -1,9 +1,7 @@
 name: Deploy StorageApp Backend
 
 on:
-    push: 
-        branches:
-            - main
+    workflow_dispatch:
 
 jobs:
   deploy-backend:

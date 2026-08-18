@@ -1,0 +1,59 @@
+name: Deploy Backend to AWS Lambda
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-lambda:
+    name: Deploy to Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Create Lambda deployment package
+        run: |
+          zip -r lambda-deployment.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x ".env" \
+            -x ".env.*" \
+            -x "*.log"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_LAMBDA_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy Lambda function
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}" \
+            --zip-file fileb://lambda-deployment.zip
+
+      - name: Wait for Lambda deployment
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}"
+
+      - name: Verify Lambda deployment
+        run: |
+          aws lambda get-function \
+            --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}"
