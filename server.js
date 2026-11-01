@@ -17,10 +17,27 @@ import { connectDB } from "./config/db.js";
 import { cleanupUploads } from "./utils/cleanupUploads.js";
 import { runSubscriptionExpiryJob } from "./jobs/subscriptionCron.js";
 
-
 const app = express();
+
 app.use(helmet());
 app.set("trust proxy", 1);
+
+const observabilityEnabled = process.env.OBSERVABILITY_ENABLED === "true";
+
+if (observabilityEnabled) {
+  const [
+    { serveHttpMetrics, trackHttpMetrics },
+    { httpLogger },
+  ] = await Promise.all([
+    import("./observability/metrics.js"),
+    import("./observability/logger.js"),
+  ]);
+
+  app.use(httpLogger);
+  app.use(trackHttpMetrics);
+
+  app.get("/metrics", serveHttpMetrics);
+}
 
 const allowedOrigins = process.env.CLIENT_URLS.split(",").map(url => url.trim());
 
@@ -37,9 +54,9 @@ app.use("/webhook", webhookRoutes);
 // Global JSON parser — runs for all routes below this point
 app.use(express.json());
 
-app.get("/", (req, res) => {
+app.get("/health", (req, res) => {
   return res.json({
-    message: "Hello from mirhaadi storage app, App is working fine in production environment.",
+    message: "Hello from mirhaadi storage app.",
     timeStamp: new Date().toLocaleString()
   });
 });
@@ -51,12 +68,39 @@ app.use("/directory", checkAuth, directoryRoutes);
 app.use("/subscription", checkAuth, subscriptionRoutes);
 app.use("/admin", checkAuth, adminRoutes);
 
+// 404 handler
+app.use((req, res, next) => {
+  const error = new Error("Route not found");
+  error.statusCode = 404;
+  next(error);
+});
+
+// Global error handler
 app.use((err, req, res, next) => {
-  console.dir(err, { depth: null });
+  const statusCode = err.statusCode || 500;
+
+  if (observabilityEnabled && req.log) {
+    if (statusCode >= 500) {
+      req.log.error({ err }, "Request failed with server error");
+    } else if (statusCode >= 400) {
+      req.log.warn({ err }, "Request failed with client error");
+    } else {
+      req.log.error({ err }, "Request failed!");
+    }
+  }
+
   if (res.headersSent) {
     return next(err);
   }
-  return res.status(err.status || 500).json({ error: "Something went wrong! try again later." });
+
+  return res.status(statusCode).json({
+    success: false,
+    message:
+      statusCode >= 500
+        ? "Internal Server Error"
+        : err.message || "Request failed",
+    requestId: req.id,
+  });
 });
 
 if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
@@ -66,17 +110,21 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
     try {
       await cleanupUploads();
     } catch (err) {
-      console.error(err);
+      console.error("CleanUp uploads failed!", err);
     }
   }, 60 * 60 * 1000);
 
   setTimeout(async () => {
     try { await runSubscriptionExpiryJob(); }
-    catch (err) { console.error("[cron] initial run error:", err); }
+    catch (err) {
+      console.error("[cron] initial run error", err);
+    }
 
     setInterval(async () => {
       try { await runSubscriptionExpiryJob(); }
-      catch (err) { console.error("[cron] error:", err); }
+      catch (err) {
+        console.error("[cron] error", err);
+      }
     }, 24 * 60 * 60 * 1000);
   }, 30 * 1000); // 30-second warm-up delay
 
@@ -87,4 +135,4 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
   });
 }
 
-export default app;
+export default app; 

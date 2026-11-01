@@ -18,6 +18,9 @@ import { updateDirectorySize } from "./fileController.js";
 import { createSession, deleteUserSessions, enforceDeviceLimit } from "../utils/sessionUtils.js";
 import { getDirectoryContent } from "../utils/directoryTree.js";
 import { processProfileImage } from "../utils/processProfileImage.js";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+
+const tracer = trace.getTracer("storageApp-auth");
 
 export const register = async (req, res, next) => {
   const parsed = registerSchema.safeParse(req.body);
@@ -78,33 +81,69 @@ export const register = async (req, res, next) => {
 };
 
 export const login = async (req, res) => {
-  const parsed = loginSchema.safeParse(req.body)
+  const parsed = loginSchema.safeParse(req.body);
+
   if (!parsed.success) {
     return res.status(400).json({
-      error: parsed.error.issues[0].message,
+      error: "Invalid Credentials",
     });
   }
+
   const { email, password } = parsed.data;
 
   const user = await User.findOne({ email });
+
   if (!user) {
-    return res.status(404).json({ error: "Invalid email or password!" });
+    return res.status(404).json({
+      error: "Invalid email or password!",
+    });
   } else if (user.isDeleted) {
-    return res.status(403).json({ error: "Your account is disabled! Contact Admin to recover." })
+    return res.status(403).json({
+      error: "Your account is disabled! Contact Admin to recover.",
+    });
   } else if (!user.password) {
     return res.status(400).json({
       error: "This account uses Google Sign-In. Please continue with Google.",
     });
   }
-  const isPasswordValid = await user.comparePassword(password);
+
+  const isPasswordValid = await tracer.startActiveSpan(
+    "auth.compare_password",
+    async (span) => {
+      try {
+        const result = await user.comparePassword(password);
+
+        span.setStatus({
+          code: SpanStatusCode.OK,
+        });
+
+        return result;
+      } catch (error) {
+        span.recordException(error);
+
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+        });
+
+        throw error;
+      } finally {
+        span.end();
+      }
+    },
+  );
+
   if (!isPasswordValid) {
-    return res.status(404).json({ error: "Invalid email or password!" });
+    return res.status(404).json({
+      error: "Invalid email or password!",
+    });
   }
 
   await enforceDeviceLimit(user.id, user.accessDevice);
   await createSession(res, user._id);
 
-  return res.status(200).json({ message: "Login Successful" });
+  return res.status(200).json({
+    message: "Login Successful",
+  });
 };
 
 export const currentLoggedUser = async (req, res) => {

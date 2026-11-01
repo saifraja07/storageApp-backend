@@ -19,96 +19,130 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 
 ## Project Structure
 
-```
+```text
 .
-├── app.js                     # Entry point: middleware, routes, cron jobs
+├── app.js                       # Entry point: middleware, routes, cron jobs
 ├── config/
-│   ├── db.js                  # MongoDB connection
-│   ├── redis.js                # Redis client
-│   ├── plans.js                # Subscription plan definitions (storage/device limits, pricing)
-│   └── setup.js                # One-off script: applies MongoDB JSON-schema validators
-├── controllers/                # Request handlers, one per resource
-│   ├── authController.js       # OTP + Google OAuth login
-│   ├── userController.js       # Register, login, logout, password, self-delete
-│   ├── directoryController.js
-│   ├── fileController.js       # Upload lifecycle, rename, delete
-│   ├── subscriptionController.js
-│   ├── webhookController.js    # Razorpay webhook handling
-│   └── adminController.js      # User/role management for admins
-├── middleWares/
-│   ├── authMiddleware.js       # Session check (checkAuth) + role gate (requireRole)
-│   ├── limiterMiddleware.js    # Rate limiting + request throttling
-│   ├── sanitizeMiddleware.js    # Strips unsafe HTML/script content from named fields
-│   └── validateIdMiddleware.js # Validates Mongo ObjectId route params
-├── models/                     # Mongoose schemas: User, Directory, File, Otp, Session, Subscription, WebhookEvent
-├── routes/                     # Express routers, one per resource
-├── services/
-│   ├── cloudflareR2Service.js   # S3-compatible client + presigned URL helpers
-│   ├── googleAuthService.js     # Google token verification
-│   └── sendOtpService.js        # Email OTP delivery via Resend
+│   ├── db.js                    # MongoDB connection
+│   ├── redis.js                 # Redis client
+│   ├── plans.js                 # Subscription plan definitions
+│   └── setup.js                 # MongoDB JSON-schema validators
+├── controllers/                 # Request handlers
+├── middleWares/                 # Authentication, validation, security middleware
+├── models/                      # Mongoose schemas
+├── routes/                      # Express routers
+├── services/                    # External service integrations
 ├── jobs/
-│   └── subscriptionCron.js      # Daily job to expire lapsed subscriptions
-├── utils/                      # roles/permissions, session helpers, directory-tree math, cleanup, etc.
-└── validators/                 # zod schemas per resource
+│   └── subscriptionCron.js      # Subscription expiry job
+├── observability/               # Logging, metrics and tracing implementation
+├── utils/                       # Shared utilities
+└── validators/                  # Zod validation schemas
 ```
 
 ## Features
 
-- **Authentication**
-  - Email/password registration and login (bcrypt-hashed passwords)
-  - Email OTP verification via Resend, with strict rate limiting and throttling on send/verify endpoints
-  - Google OAuth sign-in
-  - Server-side sessions stored in Redis, keyed by a signed `sid` cookie; `checkAuth` middleware resolves the session to a user on every protected request
-  - Logout from current session or all sessions (`logout-all`)
-- **File & directory management**
-  - Directory tree operations: create, rename, delete, read contents, resolve full path
-  - Direct-to-storage file uploads against Cloudflare R2 using presigned URLs, with a three-step lifecycle: `initiate` → client uploads directly to R2 → `complete` (or `cancel`)
-  - File rename/delete, with input sanitization on user-supplied names
-  - Bulk delete across files/directories
-  - A background job (`cleanupUploads`, hourly) removes stale/incomplete uploads
-- **Storage limits & plans**
-  - Per-user storage quota and device limit enforced against `config/plans.js` (`FREE_PLAN` and per-Razorpay-plan `PLAN_CONFIG`)
-  - `usedStorageInBytes` / `reservedStorage` tracked on the user document
-- **Subscriptions & billing (Razorpay)**
-  - Create subscription, verify checkout signature, fetch active subscription, cancel, update payment method link, payment history
-  - A dedicated `/webhook/razorpay` route (raw-body + HMAC signature verification) processes async billing events independent of user-facing verification
-  - Daily cron (`subscriptionCron.js`) expires subscriptions whose billing period has lapsed
-- **Role-based admin panel**
-  - Roles ranked by level: `User` (1) < `Manager` (2) < `Admin` (3) < `SuperAdmin` (4), enforced via `requireRole(minRole)` and `canManageUser`/`canAssignRole` helpers so an actor can only act on strictly lower-ranked roles
-  - Manager+: list all users, view plans/subscriptions dashboard, force-logout a user
-  - Admin+: soft-delete/recover a user, change a user's role
-  - SuperAdmin only: hard-delete a user
-- **Security**
-  - `helmet` for HTTP security headers, `cors` restricted to a configurable allow-list (`CLIENT_URLS`)
-  - Per-route rate limiting and progressive request throttling on sensitive endpoints (login, register, OTP, uploads, subscription actions)
-  - Signed cookies for session IDs; sanitization middleware on free-text inputs (directory/file names)
-  - MongoDB collection-level JSON-schema validators (applied via `npm run setup`) as a defense-in-depth layer against malformed documents
+### Authentication
+- Email/password registration and login (bcrypt-hashed passwords)
+- Email OTP verification via Resend, with strict rate limiting and throttling on send/verify endpoints
+- Google OAuth sign-in
+- Server-side sessions stored in Redis, keyed by a signed `sid` cookie
+- Logout from current session or all sessions (`logout-all`)
+
+### File & Directory Management
+- Directory tree operations: create, rename, delete, read contents, resolve full path
+- Direct-to-storage file uploads against Cloudflare R2 using presigned URLs, with a three-step lifecycle: `initiate` → client uploads directly to R2 → `complete` (or `cancel`)
+- File rename/delete, with input sanitization on user-supplied names
+- Bulk delete across files/directories
+- Background cleanup job removes stale/incomplete uploads
+
+### Storage Limits & Plans
+- Per-user storage quota and device limit enforcement
+- `usedStorageInBytes` / `reservedStorage` tracked on the user document
+- Subscription plans managed through `config/plans.js`
+
+### Subscriptions & Billing
+- Create subscription, verify checkout signature, fetch active subscription, cancel, update payment method link, payment history
+- Dedicated `/webhook/razorpay` route with raw-body and HMAC signature verification
+- Daily subscription expiry job
+
+### Role-Based Admin Panel
+- Roles ranked by level: `User` (1) < `Manager` (2) < `Admin` (3) < `SuperAdmin` (4)
+- Manager+: list users, view plans/subscriptions dashboard, force-logout a user
+- Admin+: soft-delete/recover a user, change a user's role
+- SuperAdmin only: hard-delete a user
+- Role hierarchy enforced through `requireRole(minRole)`, `canManageUser`, and `canAssignRole` helpers
+
+### Security
+- `helmet` for HTTP security headers
+- CORS restricted to a configurable allow-list (`CLIENT_URLS`)
+- Per-route rate limiting and progressive request throttling on sensitive endpoints
+- Signed cookies for session IDs
+- Sanitization middleware on free-text inputs
+- MongoDB collection-level JSON-schema validators as a defense-in-depth layer
+
+## Observability
+
+Implemented a self-hosted observability stack to monitor application health, performance, request behavior, and errors.
+
+### Technology Stack
+
+- **Pino** — structured application logging
+- **Prometheus** — application metrics collection
+- **Grafana** — metrics and log visualization and dashboards
+- **Loki** — centralized log aggregation
+- **Grafana Alloy** — log collection and forwarding
+- **Tempo** — distributed tracing storage
+- **OpenTelemetry** — instrumentation and custom tracing
+- **Alertmanager** — alert management and notifications
+
+### What Is Monitored?
+
+- HTTP request counts and failure rates
+- Request duration and latency distribution
+- In-flight HTTP requests
+- Application errors and structured logs
+- Custom tracing spans, including password-comparison operations
+
+### Deployment Architecture
+
+The observability implementation is retained in the repository and can be enabled or disabled through the `OBSERVABILITY_ENABLED` environment variable.
+
+| Environment | Custom Observability |
+|---|---|
+| AWS EC2 | Enabled (`OBSERVABILITY_ENABLED=true`) |
+| AWS Lambda | Disabled (`OBSERVABILITY_ENABLED=false`) |
+
+On EC2, the application instrumentation integrates with the self-hosted observability services.
+
+On Lambda, custom Pino, Prometheus, and OpenTelemetry instrumentation is disabled to keep the serverless deployment lightweight. The observability implementation remains available in the codebase for EC2 deployments.
 
 ## API Overview
 
-All routes are mounted in `app.js`. Most are prefixed as shown; `userRoutes` and `authRoutes` are mounted at root/`/auth` and contain their own `/user/...` paths.
+All routes are mounted in the Express application.
 
-| Mount | Router | Auth required |
+| Mount | Router | Auth Required |
 |---|---|---|
 | `/webhook` | `webhookRoutes` | Signature-verified, not session-based |
-| `/` | `userRoutes` (`/user/register`, `/user/login`, `/user/logout`, `/user/logout-all`, `/user`, `/user/change-password`, `/user/update-profile`, `/user/soft-delete`, `/user/hard-delete`, `/user/bulk-delete`) | Mixed — login/register public, rest require session |
-| `/auth` | `authRoutes` (`/send-otp`, `/verify-otp`, `/google`) | Public, rate-limited |
+| `/` | `userRoutes` | Mixed — login/register public, other routes require a session |
+| `/auth` | `authRoutes` | Public, rate-limited |
 | `/file` | `fileRoutes` | Session required |
 | `/directory` | `directoryRoutes` | Session required |
 | `/subscription` | `subscriptionRoutes` | Session required |
-| `/admin` | `adminRoutes` | Session + role required (`Manager`/`Admin`/`SuperAdmin` depending on route) |
+| `/admin` | `adminRoutes` | Session + appropriate role required |
 
-A catch-all error handler returns a generic 500 JSON response and logs the full error server-side.
+A centralized error handler returns a generic 500 JSON response and logs server-side errors.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js (LTS recommended)
-- A MongoDB instance
-- A Redis instance
-- A Cloudflare R2 bucket (or other S3-compatible storage)
-- Accounts/API keys for: Google OAuth, Razorpay, Resend
+- MongoDB instance
+- Redis instance
+- Cloudflare R2 bucket (or other S3-compatible storage)
+- Google OAuth credentials
+- Razorpay account and API keys
+- Resend account and API key
 
 ### Installation
 
@@ -125,7 +159,7 @@ Create a `.env` file in the project root:
 ```env
 # Server
 PORT=4000
-CLIENT_URLS=http://localhost:5173,https://yourapp.com   # comma-separated allow-list for CORS
+CLIENT_URLS=http://localhost:5173,https://yourapp.com
 SESSION_SECRET=your-cookie-signing-secret
 COOKIE_SAMESITE=lax
 
@@ -133,39 +167,44 @@ COOKIE_SAMESITE=lax
 DB_URL=mongodb://localhost:27017/haadi-cloud
 REDIS_URL=redis://localhost:6379
 
+# Observability
+OBSERVABILITY_ENABLED=false
+
 # Google OAuth
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 REDIRECT_URI=http://localhost:5173/auth/google/callback
 
-# Cloudflare R2 — PRIVATE bucket (existing user files, stays private)
+# Cloudflare R2 — Private bucket
 R2_BUCKET=your-bucket-name
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=your-r2-access-key-id
 R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
 
-# Cloudflare R2 — PUBLIC profile-image bucket (separate bucket + CDN domain)
+# Cloudflare R2 — Public profile-image bucket
 R2_PROFILE_BUCKET_NAME=your-profile-picture-bucket-name
-R2_PROFILE_PUBLIC_URL=your-custom-domain-bucket-url
+R2_PROFILE_PUBLIC_URL=https://cdn.yourdomain.com
 
 # Razorpay
 RAZORPAY_KEY_ID=your-razorpay-key-id
 RAZORPAY_KEY_SECRET=your-razorpay-key-secret
 RAZORPAY_WEBHOOK_SECRET=your-razorpay-webhook-secret
 
-# Resend (email/OTP)
+# Resend
 RESEND_KEY=your-resend-api-key
 ```
 
+Configure the appropriate environment variables in your deployment environment. Never commit actual credentials or secrets.
+
 ### Database Setup
 
-Applies strict MongoDB JSON-schema validators to the `users`, `directories`, and `files` collections:
+Apply MongoDB JSON-schema validators:
 
 ```bash
 npm run setup
 ```
 
-Run this once against a fresh database (and again after any schema change in `config/setup.js`).
+Run this once against a fresh database and again after any schema changes in `config/setup.js`.
 
 ### Development
 
@@ -173,60 +212,61 @@ Run this once against a fresh database (and again after any schema change in `co
 npm run dev
 ```
 
-Runs with `node --watch` and loads `.env` automatically, restarting on file changes.
+Runs the application in development mode with automatic restarts.
 
 ### Production
 
 ```bash
-npm run build   # npm install
-npm start        # node app.js
+npm run build
+npm start
 ```
+
+Refer to the deployment configuration for the appropriate EC2 or Lambda startup process.
 
 ## Background Jobs
 
-Both are started from `app.js` and run for the lifetime of the process:
+The application uses background jobs for maintenance and subscription management:
 
-- **Upload cleanup** — every hour, removes incomplete/orphaned upload records and their storage objects.
-- **Subscription expiry** — a 30-second warm-up delay after boot, then once every 24 hours; expires subscriptions past their current billing period.
+- **Upload cleanup** — periodically removes incomplete/orphaned upload records and their storage objects.
+- **Subscription expiry** — expires subscriptions whose billing period has elapsed.
+
+These jobs run as part of the long-lived EC2 application process. For Lambda deployments, scheduled jobs require a separate scheduler such as AWS EventBridge.
 
 ## Notes on the Upload Flow
 
 Uploads are direct-to-R2, not proxied through the API:
 
 1. `POST /file/:upload/initiate` — server returns a presigned R2 URL and creates a pending file record.
-2. Client uploads the file bytes directly to R2 using that URL.
-3. `POST /file/:upload/complete` — server confirms the object exists in R2 and finalizes the file record (updates storage usage).
+2. Client uploads file bytes directly to R2 using that URL.
+3. `POST /file/:upload/complete` — server confirms the object exists in R2 and finalizes the file record.
 4. `POST /file/:upload/cancel` — discards a pending upload if the client aborts.
 
-This keeps large file transfers off the API server entirely. It is completely separate from, and unaffected by, the profile-picture system below.
+This keeps large file transfers off the API server entirely. It is separate from the profile-picture upload system.
 
 ## Profile Pictures
 
-Unlike normal files, profile pictures are proxied through the API (not direct-to-R2) and live in their own, deliberately **public** R2 bucket — kept fully separate from the private user-files bucket.
+Unlike normal files, profile pictures are proxied through the API and stored in a separate, deliberately public R2 bucket.
 
-- `PATCH /user/update-profile` (session required, `multipart/form-data`, rate-limited) accepts an optional `name` and an optional `picture` file. At least one must be provided.
-- Uploaded images are validated and decoded server-side with `sharp` (HEIC/HEIF from iPhones is converted first via `heic-convert` if the installed `sharp`/libvips build can't decode it directly), then normalized to a `512x512` `image/webp` buffer. The original uploaded file is never stored.
-- The processed image is uploaded to `R2_PROFILE_BUCKET_NAME` under a unique, non-guessable key: `profile-images/{userId}/{uuid}.webp`, with `Cache-Control: public, max-age=31536000, immutable`. Every upload gets a brand-new key/URL — old URLs are never reused or overwritten, so there's no CDN cache to invalidate.
-- `user.picture` is only updated in MongoDB **after** the new object is confirmed uploaded. The previous custom image (if any) is deleted afterward, and only if it's verified to belong to that same user's own `profile-images/{userId}/` namespace on the profile bucket — the default avatar and Google-hosted avatars are never touched.
-- Google Sign-In no longer overwrites a custom profile picture the user has uploaded; it only sets/refreshes the picture when the stored value isn't already a self-uploaded R2 image.
-- Profile pictures are application-managed assets, not Drive files — they never touch `usedStorageInBytes`/quota accounting.
-- Self and admin hard-delete both clean up a user's custom profile image from the profile bucket (soft delete leaves it untouched, since the account may be restored).
+- `PATCH /user/update-profile` accepts an optional `name` and an optional `picture` file.
+- Uploaded images are validated and processed using `sharp`; HEIC/HEIF images can be converted using `heic-convert`.
+- Images are normalized to a `512x512` WebP buffer.
+- Each upload receives a unique key under `profile-images/{userId}/`.
+- Processed images are served through a dedicated Cloudflare CDN domain.
+- Previous custom images are deleted only after the new upload succeeds and ownership is verified.
+- Google Sign-In does not overwrite a custom profile picture.
+- Profile pictures are not included in user storage quota accounting.
+- Hard-delete operations clean up custom profile images; soft-delete leaves them untouched.
 
-### Cloudflare setup for the profile-image bucket
+### Cloudflare Setup for Profile Images
 
-1. Create a **new, separate** R2 bucket for profile images (e.g. `haadi-profile-images`) — do not reuse the private storage bucket.
-2. Leave the existing private bucket's access settings untouched.
-3. Attach a Cloudflare custom domain (e.g. `cdn.mirhaadi.in`) to the **new** profile bucket only, and confirm DNS/HTTPS resolve correctly.
-4. Set `R2_PROFILE_BUCKET_NAME` to the new bucket's name.
-5. Set `R2_PROFILE_PUBLIC_URL` to the custom domain, e.g. `https://cdn.mirhaadi.in`.
-6. Do not attach the profile CDN domain to the private bucket, and do not enable public access on the private bucket.
+1. Create a separate R2 bucket for profile images.
+2. Keep the existing private storage bucket's access settings unchanged.
+3. Attach a Cloudflare custom domain to the profile-image bucket only.
+4. Configure `R2_PROFILE_BUCKET_NAME` and `R2_PROFILE_PUBLIC_URL`.
+5. Never enable public access on the private user-files bucket.
 
 ## Known Limitations / In Progress
 
-- Verify that all secrets (Razorpay, R2, Google) are production-grade before going live — the frontend's production-readiness review flagged live-key verification as a launch blocker.
-- No global request body size limits beyond the webhook route's explicit `1mb` cap; consider adding one for the general JSON body parser.
+- Verify that all production credentials and payment integrations are configured correctly before launch.
+- Consider adding a global request body size limit for the general JSON body parser.
 - Review rate-limit thresholds under real traffic before launch.
-
-## License
-
-Add your license of choice here.
