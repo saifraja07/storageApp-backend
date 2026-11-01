@@ -34,6 +34,7 @@ jobs:
             lambda.js \
             server.js \
             package.json \
+            package-lock.json \
             config/ \
             controllers/ \
             jobs/ \
