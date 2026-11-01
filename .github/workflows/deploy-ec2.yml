@@ -1,7 +1,8 @@
+
 name: Deploy StorageApp Backend
 
 on:
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   deploy-backend:
@@ -20,19 +21,29 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-          # Add server host key so SSH does not ask for confirmation
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
       # 2. Deploy to remote server
       - name: Deploy backend on EC2
         run: |
-          ssh "${SSH_USER}@${SSH_HOST}" 'bash -s' << EOF
+          ssh "${SSH_USER}@${SSH_HOST}" \
+            "REMOTE_APP_DIR='$REMOTE_APP_DIR' bash -s" << 'EOF'
+
             set -e
 
             echo "Starting deployment for production..."
 
             echo "Switching to project directory..."
             cd "$REMOTE_APP_DIR"
+
+            echo "Current directory:"
+            pwd
+
+            echo "Checking Git repository..."
+            if [ ! -d ".git" ]; then
+              echo "ERROR: Git repository not found in $REMOTE_APP_DIR"
+              exit 1
+            fi
 
             echo "Getting latest code..."
             git pull
