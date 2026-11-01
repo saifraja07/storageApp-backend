@@ -29,12 +29,23 @@ jobs:
 
       - name: Create Lambda deployment package
         run: |
-          zip -r lambda-deployment.zip . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x ".env" \
-            -x ".env.*" \
-            -x "*.log"
+          zip -r lambda-deployment.zip \
+            lambda.js \
+            server.js \
+            package.json \
+            config/ \
+            controllers/ \
+            jobs/ \
+            middleWares/ \
+            models/ \
+            routes/ \
+            services/ \
+            utils/ \
+            validators/ \
+            node_modules/
+
+          echo "Deployment package size:"
+          ls -lh lambda-deployment.zip
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
