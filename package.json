@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "npm install",
+    "render:api": "node server.js",
     "local": "node --env-file=.env server.js",
     "start": "node --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
     "dev": "node --watch --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
