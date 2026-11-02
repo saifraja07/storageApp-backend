@@ -131,7 +131,7 @@ export const deleteDirectory = async (req, res) => {
 
   const keys = files.map(({ _id, extension }) => ({ Key: `${_id}${extension}` }))
   if (keys.length) {
-    await deleteR2Files(keys)
+    await deleteR2Files(keys, user._id)
   }
 
   await File.deleteMany({

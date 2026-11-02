@@ -335,7 +335,7 @@ export const selfHardDelete = async (req, res) => {
   }));
 
   if (keys.length) {
-    await deleteR2Files(keys);
+    await deleteR2Files(keys, userId);
   }
 
   // Only remove a CUSTOM uploaded profile image — never the default avatar
@@ -375,7 +375,7 @@ export const bulkDeleteItems = async (req, res) => {
     }));
 
     await Promise.all([
-      deleteR2Files(keys),
+      deleteR2Files(keys, user._id),
       File.deleteMany({
         _id: { $in: files.map((f) => f._id) },
       }),
@@ -410,7 +410,7 @@ export const bulkDeleteItems = async (req, res) => {
     }));
 
     if (keys.length) {
-      await deleteR2Files(keys);
+      await deleteR2Files(keys, user._id);
     }
 
     await File.deleteMany({

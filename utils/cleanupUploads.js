@@ -28,6 +28,7 @@ export async function cleanupUploads() {
 
         deleteR2File({
           key: `${file._id}${file.extension}`,
+          userId: file.userId,
         }),
 
         file.deleteOne(),

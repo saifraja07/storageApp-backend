@@ -74,7 +74,7 @@ export async function downgradeStorage(userId) {
   // 1. Remove from R2
   const r2Keys = toDelete.map((f) => ({ Key: `${f._id}${f.extension}` }));
   try {
-    await deleteR2Files(r2Keys);
+    await deleteR2Files(r2Keys, userId);
   } catch (err) {
     // R2 deletion failure must not prevent the DB cleanup
     console.error(`[storage] R2 batch delete failed for user ${userId}:`, err);

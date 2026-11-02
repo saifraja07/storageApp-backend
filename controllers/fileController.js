@@ -49,14 +49,16 @@ export const getFile = async (req, res) => {
     const fileUrl = await createGetSignedUrl({
       key: `${id}${fileData.extension}`,
       download: true,
-      filename: fileData.name
+      filename: fileData.name,
+      userId: req.user._id
     });
     return res.redirect(fileUrl);
   }
 
   const fileUrl = await createGetSignedUrl({
     key: `${id}${fileData.extension}`,
-    filename: fileData.name
+    filename: fileData.name,
+    userId: req.user._id
   });
   return res.redirect(fileUrl);
 };
@@ -95,7 +97,8 @@ export const deleteFile = async (req, res, next) => {
   await Promise.all([
     File.findByIdAndDelete(id),
     deleteR2File({
-      key: `${id}${fileData.extension}`
+      key: `${id}${fileData.extension}`,
+      userId: req.user._id
     })
   ]);
   await updateDirectorySize(
@@ -180,7 +183,8 @@ export const uploadInitiate = async (req, res) => {
 
     const signedUrl = await createUploadSignedUrl({
       key: `${file.id}${extension}`,
-      contentType: req.body.contentType
+      contentType: req.body.contentType,
+      userId: req.user._id
     })
 
     return res.json({ fileId: file.id, signedUrl })
@@ -218,7 +222,7 @@ export const uploadComplete = async (req, res) => {
   }
 
   try {
-    const fileMetaData = await getR2FileMetaData({ key: `${fileId}${file.extension}` })
+    const fileMetaData = await getR2FileMetaData({ key: `${fileId}${file.extension}`, userId: req.user._id })
 
     if (file.size !== fileMetaData.ContentLength) {
       await Promise.all([
@@ -235,6 +239,7 @@ export const uploadComplete = async (req, res) => {
 
         deleteR2File({
           key: `${fileId}${file.extension}`,
+          userId: req.user._id,
         }),
       ]);
       return res.status(400).json({ error: "File size does not match!" })
@@ -275,6 +280,7 @@ export const uploadComplete = async (req, res) => {
 
       deleteR2File({
         key: `${fileId}${file.extension}`,
+        userId: req.user._id,
       }),
     ]);
     return res.status(400).json({ error: "File could not be uploaded properly" })
@@ -309,6 +315,7 @@ export const uploadCancel = async (req, res) => {
 
       deleteR2File({
         key: `${req.body.fileId}${file.extension}`,
+        userId: req.user._id,
       }),
     ]);
 

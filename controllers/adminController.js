@@ -112,7 +112,7 @@ export const hardDelete = async (req, res) => {
     }));
 
     if (keys.length) {
-        await deleteR2Files(keys);
+        await deleteR2Files(keys, target._id);
     }
 
     if (isOwnedProfilePictureURL(target.picture, userId)) {
