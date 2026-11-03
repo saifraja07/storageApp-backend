@@ -213,7 +213,7 @@ export const getPlansDashboard = async (req, res, next) => {
                 .populate("userId", "name email picture")
                 .lean(),
 
-            User.find({ isDeleted: { $ne: true } })
+            User.find()
                 .select("name email picture maxStorageInBytes usedStorageInBytes")
                 .lean(),
         ]);
@@ -280,7 +280,7 @@ export const getPlansDashboard = async (req, res, next) => {
                 ),
             }))
             .sort((a, b) => b.percentUsed - a.percentUsed)
-            .slice(0, 5);
+            .slice(0, 6);
 
         const recentSubscriptions = recentSubsRaw
             .filter((s) => s.userId)
