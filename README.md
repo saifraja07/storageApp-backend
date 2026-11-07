@@ -70,6 +70,7 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 - Manager+: list users, view plans/subscriptions dashboard, force-logout a user
 - Admin+: soft-delete/recover a user, change a user's role
 - SuperAdmin only: hard-delete a user
+- Admin+: R2 Storage Usage (`GET /admin/storage/usage`, `POST /admin/storage/usage/refresh`) — Cloudflare R2 free-tier usage (storage, Class A, Class B) for each configured account (Production always; Personal only when its optional variables are set). Usage snapshots are cached in Redis for 10 minutes
 - Role hierarchy enforced through `requireRole(minRole)`, `canManageUser`, and `canAssignRole` helpers
 
 ### Security
@@ -181,6 +182,10 @@ R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=your-r2-access-key-id
 R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
 
+# Cloudflare R2 usage dashboard (Account ID + Analytics Read token)
+R2_ACCOUNT_ID=your-cloudflare-account-id
+R2_API_TOKEN=your-cloudflare-analytics-read-token
+
 # Cloudflare R2 — Public profile-image bucket
 R2_PROFILE_BUCKET_NAME=your-profile-picture-bucket-name
 R2_PROFILE_PUBLIC_URL=https://cdn.yourdomain.com
@@ -192,6 +197,30 @@ RAZORPAY_WEBHOOK_SECRET=your-razorpay-webhook-secret
 
 # Resend
 RESEND_KEY=your-resend-api-key
+
+```
+
+#### Optional: Personal R2 account
+
+**Recommended approach:** Use a single Production R2 account for all users. This keeps storage management, configuration, and operations simple and centralized.
+
+The Personal R2 integration is an optional feature intended primarily for personal use cases where specific users need to use a separate R2 account. It is not required for normal deployments, and we recommend avoiding it unless you have a specific reason to maintain separate storage accounts.
+
+Everything works with the Production R2 variables above alone. If needed, you can additionally route specific users to a second R2 account and/or monitor it. The two features are independent:
+
+```env
+# Storage routing: only the listed MongoDB user IDs use this account.
+# All four bucket/credential variables are required for it to be used.
+PERSONAL_R2_BUCKET=
+PERSONAL_R2_ENDPOINT=
+PERSONAL_R2_ACCESS_KEY_ID=
+PERSONAL_R2_SECRET_ACCESS_KEY=
+PERSONAL_STORAGE_USER_IDS=id1,id2
+
+# Usage monitoring: a second card on the admin Storage page.
+# Both are required, otherwise only Production is shown.
+PERSONAL_R2_ACCOUNT_ID=
+PERSONAL_R2_API_TOKEN=
 ```
 
 Configure the appropriate environment variables in your deployment environment. Never commit actual credentials or secrets.
