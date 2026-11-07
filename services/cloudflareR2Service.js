@@ -6,6 +6,13 @@ const bucketName = process.env.R2_BUCKET
 const profileBucketName = process.env.R2_PROFILE_BUCKET_NAME
 const profilePublicUrl = process.env.R2_PROFILE_PUBLIC_URL
 
+// Missing Production config is reported once at startup.
+const missingProductionVars = ["R2_BUCKET", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+    .filter((name) => !process.env[name])
+if (missingProductionVars.length > 0) {
+    console.warn(`[storage] Production R2 is not fully configured. Missing: ${missingProductionVars.join(", ")}`)
+}
+
 export const r2Client = new S3Client({
     region: "auto",
     endpoint: process.env.R2_ENDPOINT,
@@ -32,6 +39,17 @@ const personalR2Configured = Boolean(
     process.env.PERSONAL_R2_SECRET_ACCESS_KEY
 )
 
+// Personal R2 is optional. Warn (log only) when it is half-configured, or when
+// users are routed to it but it cannot serve them.
+const personalStorageVars = ["PERSONAL_R2_BUCKET", "PERSONAL_R2_ENDPOINT", "PERSONAL_R2_ACCESS_KEY_ID", "PERSONAL_R2_SECRET_ACCESS_KEY"]
+const missingPersonalVars = personalStorageVars.filter((name) => !process.env[name])
+if (!personalR2Configured && missingPersonalVars.length < personalStorageVars.length) {
+    console.warn(`[storage] Personal R2 is partially configured and will not be used. Missing: ${missingPersonalVars.join(", ")}`)
+}
+if (!personalR2Configured && String(process.env.PERSONAL_STORAGE_USER_IDS ?? "").trim() !== "") {
+    console.warn("[storage] PERSONAL_STORAGE_USER_IDS is set but Personal R2 is not fully configured; those users' storage requests will fail instead of falling back to Production.")
+}
+
 export const personalR2Client = personalR2Configured
     ? new S3Client({
         region: "auto",
@@ -43,22 +61,24 @@ export const personalR2Client = personalR2Configured
     })
     : null
 
-// Picks the client + bucket for the user who OWNS the file. Production is the
-// default. A missing userId throws, so a call site that forgets to pass it can
-// never silently use the production bucket for a personal user's files.
-const getStorage = (userId) => {
+// Picks the client + bucket for the user who OWNS the file. 
+// Production is the default for everyone.
+export const getStorage = (userId) => {
     if (userId === undefined || userId === null || userId === "") {
         throw new Error("R2 storage selection requires the file owner's userId")
     }
 
+    // Default to production for every user except for explicitly 
+    // configured in PERSONAL_STORAGE_USER_IDS env
     if (!isPersonalStorageUser(userId)) {
         return { client: r2Client, bucket: bucketName }
     }
 
-    if (!personalR2Client) {
+    if (!personalR2Client || !personalBucketName) {
         throw new Error("Personal R2 storage is not fully configured")
     }
 
+    // return personal configured r2 client and bucket(other r2 account)
     return { client: personalR2Client, bucket: personalBucketName }
 }
 
@@ -80,13 +100,13 @@ export const createUploadSignedUrl = async ({ key, contentType, userId }) => {
 }
 
 export const createGetSignedUrl = async ({ key, download = false, filename, userId }) => {
-    const { client, bucket } = getStorage(userId)
-
+    const { client, bucket } = getStorage(userId);
+    const quotedName = String(filename).replace(/[\r\n]/g, " ").replace(/["\\]/g, "_");
     const command = new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        ResponseContentDisposition: `${download ? "attachment" : "inline"}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
-    })
+        ResponseContentDisposition: `${download ? "attachment" : "inline"}; filename="${quotedName}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    });
 
     const url = await getSignedUrl(client, command, {
         expiresIn: 3600,
@@ -104,18 +124,27 @@ export const deleteR2File = async ({ key, userId }) => {
     return await client.send(command);
 }
 
+// DeleteObjects accepts at most 1000 keys per request, and with Quiet: true it
+// reports per-key failures in the response body instead of throwing. Both are
+// handled here so callers can rely on "resolved = everything deleted".
+const DELETE_BATCH_SIZE = 1000;
+
 export const deleteR2Files = async (keys, userId) => {
     const { client, bucket } = getStorage(userId)
 
-    const command = new DeleteObjectsCommand({
-        Bucket: bucket,
-        Delete: {
-            Objects: keys,
-            Quiet: true
-        }
-    })
+    for (let i = 0; i < keys.length; i += DELETE_BATCH_SIZE) {
+        const result = await client.send(new DeleteObjectsCommand({
+            Bucket: bucket,
+            Delete: {
+                Objects: keys.slice(i, i + DELETE_BATCH_SIZE),
+                Quiet: true
+            }
+        }))
 
-    return await client.send(command);
+        if (result?.Errors?.length) {
+            throw new Error(`R2 failed to delete ${result.Errors.length} object(s) (first error: ${result.Errors[0].Code})`)
+        }
+    }
 }
 
 export const getR2FileMetaData = async ({ key, userId }) => {
