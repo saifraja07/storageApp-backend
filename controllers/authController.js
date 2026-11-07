@@ -4,7 +4,6 @@ import User from "../models/userModel.js";
 import Directory from "../models/directoryModel.js";
 import { getUserFromAuthCode } from "../services/googleAuthService.js"
 import { sendOtpService } from "../services/sendOtpService.js"
-import redisClient from "../config/redis.js";
 import { sendOtpSchema, verifyOtpSchema } from "../validators/authSchema.js";
 import { enforceDeviceLimit, createSession } from "../utils/sessionUtils.js";
 import { isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";

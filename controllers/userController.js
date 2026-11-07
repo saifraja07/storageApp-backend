@@ -374,12 +374,11 @@ export const bulkDeleteItems = async (req, res) => {
       Key: `${file._id}${file.extension}`,
     }));
 
-    await Promise.all([
-      deleteR2Files(keys, user._id),
-      File.deleteMany({
-        _id: { $in: files.map((f) => f._id) },
-      }),
-    ]);
+    // R2 first, so a failed delete leaves the records (and quota) untouched.
+    await deleteR2Files(keys, user._id);
+    await File.deleteMany({
+      _id: { $in: files.map((f) => f._id) },
+    });
 
     await Promise.all(
       files.map((file) =>
