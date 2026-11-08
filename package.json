@@ -10,7 +10,13 @@
     "local": "node --env-file=.env server.js",
     "start": "node --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
     "dev": "node --watch --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
-    "setup": "node --env-file=.env ./config/setup.js"
+    "setup": "node --env-file=.env ./config/setup.js",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:smoke": "vitest run --project smoke",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "author": "",
   "license": "ISC",
@@ -43,5 +49,10 @@
     "serverless-http": "^4.0.0",
     "sharp": "^0.35.3",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^5.1.0",
+    "supertest": "^7.3.2",
+    "vitest": "^5.1.0"
   }
 }

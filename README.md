@@ -299,3 +299,31 @@ Unlike normal files, profile pictures are proxied through the API and stored in 
 - Verify that all production credentials and payment integrations are configured correctly before launch.
 - Consider adding a global request body size limit for the general JSON body parser.
 - Review rate-limit thresholds under real traffic before launch.
+
+## Testing
+
+Tests run on [Vitest](https://vitest.dev) + [supertest](https://github.com/ladjs/supertest). They need **no database, Redis, R2, Razorpay, Google or Resend** — every external dependency is mocked — so they run offline in ~20 seconds, locally and in CI.
+
+```bash
+npm test                 # everything (this is what CI runs before every deploy)
+npm run test:unit        # pure logic
+npm run test:integration # the real Express app over HTTP
+npm run test:smoke       # boot + deployment-config checks
+npm run test:coverage    # with a coverage report
+npm run test:watch       # re-run on change
+```
+
+| Folder | Covers |
+| --- | --- |
+| `tests/unit/validators` | Zod schemas (auth, directory, file, subscription) |
+| `tests/unit/middleware` | session auth + role guard, id validation, input sanitising, rate limiting/throttling, profile upload limits |
+| `tests/unit/utils` | role permissions, premium status, sessions/device limit, directory tree, upload cleanup, image processing |
+| `tests/unit/services` | R2 (signed URLs, bucket routing, batched deletes), storage up/downgrade, OTP e-mail, Google auth |
+| `tests/unit/models` | Mongoose schemas, defaults, unique indexes, password comparison |
+| `tests/unit/jobs` | subscription-expiry cron |
+| `tests/integration` | every route group: app/CORS/errors, auth, user, directory, file/upload, subscription, Razorpay webhook, admin |
+| `tests/smoke` | app + Lambda handler boot, `.env.example` completeness, PM2/workflow consistency |
+
+Shared helpers live in `tests/helpers`; global mocks are in `tests/setup`.
+
+CI: `.github/workflows/test.yml` runs on pull requests, and both deploy workflows now run the suite in a `test` job that the deploy job `needs`, so a failing test blocks the deployment.
