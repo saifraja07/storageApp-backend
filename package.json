@@ -54,5 +54,8 @@
     "@vitest/coverage-v8": "^5.1.0",
     "supertest": "^7.3.2",
     "vitest": "^5.1.0"
+  },
+  "overrides": {
+    "gaxios": "^7.3.1"
   }
 }
