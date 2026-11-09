@@ -5,6 +5,7 @@ export function query(result) {
     select: () => q,
     sort: () => q,
     populate: () => q,
+    limit: () => q,
     session: () => q,
     then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
     catch: (reject) => Promise.resolve(result).catch(reject),

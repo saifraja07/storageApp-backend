@@ -14,17 +14,18 @@ import {
 
 const router = express.Router();
 
-router.param("id", validateIdMiddleware);
+router.param("fileId", validateIdMiddleware);
+router.param("uploadId", validateIdMiddleware);
 
-router.get("/:id", getFile);
-router.post("/:upload/initiate", rateLimiter(60 * 1000, 20), throttle({
+router.get("/:fileId", getFile);
+router.post("/uploads/initiate", rateLimiter(60 * 1000, 20), throttle({
   waitTime: 500,
   delayAfter: 5,
   maxDelay: 5000,
 }), uploadInitiate)
-router.post("/:upload/complete", rateLimiter(60 * 1000, 100), uploadComplete)
-router.post("/:upload/cancel", rateLimiter(60 * 1000, 50), uploadCancel)
-router.patch("/:id",sanitizeInputs(["newFilename"]), renameFile);
-router.delete("/:id", deleteFile);
+router.post("/uploads/:uploadId/complete", rateLimiter(60 * 1000, 100), uploadComplete)
+router.post("/uploads/:uploadId/cancel", rateLimiter(60 * 1000, 50), uploadCancel)
+router.patch("/:fileId", sanitizeInputs(["newFilename"]), renameFile);
+router.delete("/:fileId", deleteFile);
 
 export default router;

@@ -62,15 +62,15 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 
 ### Subscriptions & Billing
 - Create subscription, verify checkout signature, fetch active subscription, cancel, update payment method link, payment history
-- Dedicated `/webhook/razorpay` route with raw-body and HMAC signature verification
+- Dedicated `/webhooks/razorpay` route with raw-body and HMAC signature verification
 - Daily subscription expiry job
 
 ### Role-Based Admin Panel
 - Roles ranked by level: `User` (1) < `Manager` (2) < `Admin` (3) < `SuperAdmin` (4)
-- Manager+: list users, view plans/subscriptions dashboard, force-logout a user
-- Admin+: soft-delete/recover a user, change a user's role
-- SuperAdmin only: hard-delete a user
-- Admin+: R2 Storage Usage (`GET /admin/storage/usage`, `POST /admin/storage/usage/refresh`) — Cloudflare R2 free-tier usage (storage, Class A, Class B) for each configured account (Production always; Personal only when its optional variables are set). Usage snapshots are cached in Redis for 10 minutes
+- Manager+: list users, view plans/subscriptions dashboard (`GET /admin/dashboard/plans`), revoke a user's sessions (`POST /admin/users/:userId/sessions/revoke`)
+- Admin+: deactivate/reactivate a user (`PATCH /admin/users/:userId/status` with `{ "isDeleted": true | false }`), change a user's role
+- SuperAdmin only: permanently delete a user (`DELETE /admin/users/:userId`)
+- Admin+: R2 Storage Usage (`GET /admin/dashboard/storage/usage`, `POST /admin/dashboard/storage/usage/refresh`) — Cloudflare R2 free-tier usage (storage, Class A, Class B) for each configured account (Production always; Personal only when its optional variables are set). Usage snapshots are cached in Redis for 10 minutes
 - Role hierarchy enforced through `requireRole(minRole)`, `canManageUser`, and `canAssignRole` helpers
 
 ### Security
@@ -123,12 +123,12 @@ All routes are mounted in the Express application.
 
 | Mount | Router | Auth Required |
 |---|---|---|
-| `/webhook` | `webhookRoutes` | Signature-verified, not session-based |
-| `/` | `userRoutes` | Mixed — login/register public, other routes require a session |
-| `/auth` | `authRoutes` | Public, rate-limited |
-| `/file` | `fileRoutes` | Session required |
-| `/directory` | `directoryRoutes` | Session required |
-| `/subscription` | `subscriptionRoutes` | Session required |
+| `/webhooks` | `webhookRoutes` | Signature-verified, not session-based |
+| `/auth` | `authRoutes` | Mixed — register/login/Google/OTP are public and rate-limited; logout routes require a session |
+| `/users` | `userRoutes` | Session required |
+| `/files` | `fileRoutes` | Session required |
+| `/directories` | `directoryRoutes` | Session required |
+| `/subscriptions` | `subscriptionRoutes` | Session required |
 | `/admin` | `adminRoutes` | Session + appropriate role required |
 
 A centralized error handler returns a generic 500 JSON response and logs server-side errors.
@@ -265,10 +265,12 @@ These jobs run as part of the long-lived EC2 application process. For Lambda dep
 
 Uploads are direct-to-R2, not proxied through the API:
 
-1. `POST /file/:upload/initiate` — server returns a presigned R2 URL and creates a pending file record.
+1. `POST /files/uploads/initiate` — server returns a presigned R2 URL and creates a pending file record.
 2. Client uploads file bytes directly to R2 using that URL.
-3. `POST /file/:upload/complete` — server confirms the object exists in R2 and finalizes the file record.
-4. `POST /file/:upload/cancel` — discards a pending upload if the client aborts.
+3. `POST /files/uploads/:uploadId/complete` — server confirms the object exists in R2 and finalizes the file record.
+4. `POST /files/uploads/:uploadId/cancel` — discards a pending upload if the client aborts.
+
+The `:uploadId` is the `fileId` returned by step 1 (the pending file record's id).
 
 This keeps large file transfers off the API server entirely. It is separate from the profile-picture upload system.
 
@@ -276,7 +278,7 @@ This keeps large file transfers off the API server entirely. It is separate from
 
 Unlike normal files, profile pictures are proxied through the API and stored in a separate, deliberately public R2 bucket.
 
-- `PATCH /user/update-profile` accepts an optional `name` and an optional `picture` file.
+- `PATCH /users/me/profile` accepts an optional `name` and an optional `picture` file.
 - Uploaded images are validated and processed using `sharp`; HEIC/HEIF images can be converted using `heic-convert`.
 - Images are normalized to a `512x512` WebP buffer.
 - Each upload receives a unique key under `profile-images/{userId}/`.

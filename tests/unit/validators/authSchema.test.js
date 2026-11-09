@@ -7,6 +7,7 @@ import {
   changePasswordSchema,
   updateProfileSchema,
   roleSchema,
+  userStatusSchema,
 } from "../../../validators/authSchema.js";
 
 const validRegister = {
@@ -108,5 +109,23 @@ describe("roleSchema", () => {
     expect(roleSchema.safeParse({ role: "root" }).success).toBe(false);
     const r = roleSchema.safeParse({ role: "root" });
     expect(r.error.issues[0].message).toBe("Please enter valid role!");
+  });
+});
+
+describe("userStatusSchema", () => {
+  it.each([true, false])("accepts isDeleted: %s", (isDeleted) => {
+    const r = userStatusSchema.safeParse({ isDeleted });
+    expect(r.success).toBe(true);
+    expect(r.data).toEqual({ isDeleted });
+  });
+  it.each([
+    ["missing", {}],
+    ["a string", { isDeleted: "true" }],
+    ["a number", { isDeleted: 1 }],
+    ["null", { isDeleted: null }],
+  ])("rejects isDeleted when it is %s", (_label, body) => {
+    const r = userStatusSchema.safeParse(body);
+    expect(r.success).toBe(false);
+    expect(r.error.issues[0].message).toBe("Please provide a valid status!");
   });
 });

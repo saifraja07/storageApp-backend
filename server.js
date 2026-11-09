@@ -49,7 +49,7 @@ app.use(
   }),
 );
 
-app.use("/webhook", webhookRoutes);
+app.use("/webhooks", webhookRoutes);
 
 // Global JSON parser — runs for all routes below this point
 app.use(express.json());
@@ -61,11 +61,11 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.use("/", userRoutes);
 app.use("/auth", authRoutes);
-app.use("/file", checkAuth, fileRoutes);
-app.use("/directory", checkAuth, directoryRoutes);
-app.use("/subscription", checkAuth, subscriptionRoutes);
+app.use("/users", checkAuth, userRoutes);
+app.use("/files", checkAuth, fileRoutes);
+app.use("/directories", checkAuth, directoryRoutes);
+app.use("/subscriptions", checkAuth, subscriptionRoutes);
 app.use("/admin", checkAuth, adminRoutes);
 
 // 404 handler

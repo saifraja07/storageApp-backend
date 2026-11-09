@@ -41,7 +41,7 @@ router.post(
 
 // Returns the Razorpay-hosted URL where the user can update their payment method
 router.get(
-  "/:subscriptionId/update-payment",
+  "/:subscriptionId/payment-method/update-link",
   rateLimiter(15 * 60 * 1000, 10),
   getUpdatePaymentLink
 );

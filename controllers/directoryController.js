@@ -1,13 +1,13 @@
 import File from "../models/fileModel.js";
 import Directory from "../models/directoryModel.js";
-import { updateDirectorySize } from "./fileController.js";
+import { updateDirectorySize } from "../services/storageAccountingService.js";
 import { deleteR2Files } from "../services/cloudflareR2Service.js";
 import { createDirectorySchema, renameDirectorySchema } from "../validators/directorySchema.js";
 import { getDirectoryContent } from "../utils/directoryTree.js";
 
 export const readDirectory = async (req, res) => {
   const user = req.user;
-  const _id = req.params.id || user.rootDirId;
+  const _id = req.params.directoryId || user.rootDirId;
 
   // Find the directory and verify ownership
   const directoryData = await Directory.findOne({
@@ -66,7 +66,7 @@ export const createDirectory = async (req, res) => {
 };
 
 export const getDirectoryPath = async (req, res) => {
-  const { id: _id } = req.params;
+  const { directoryId: _id } = req.params;
   const dir = await Directory.findOne({
     _id,
     userId: req.user._id,
@@ -89,14 +89,14 @@ export const getDirectoryPath = async (req, res) => {
 
 export const renameDirectory = async (req, res) => {
   const user = req.user;
-  const { id } = req.params;
+  const { directoryId } = req.params;
   const { success, data, error } = renameDirectorySchema.safeParse(req.body)
   if (!success) {
     return res.status(400).json({ error: error.issues[0].message });
   }
 
   const dirData = await Directory.findOne({
-    _id: id,
+    _id: directoryId,
     userId: user._id,
   });
   if (!dirData) {
@@ -112,10 +112,10 @@ export const renameDirectory = async (req, res) => {
 
 export const deleteDirectory = async (req, res) => {
   const user = req.user;
-  const { id } = req.params;
+  const { directoryId } = req.params;
 
   const directoryData = await Directory.findOne({
-    _id: id,
+    _id: directoryId,
     userId: user._id,
   })
     .select("_id size parentDirId")

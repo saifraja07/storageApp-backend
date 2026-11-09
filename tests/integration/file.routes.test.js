@@ -21,16 +21,16 @@ beforeEach(() => {
 
 const VALID_ID = "507f1f77bcf86cd799439011";
 
-describe("GET /file/:id", () => {
+describe("GET /files/:fileId", () => {
   it("rejects invalid ids", async () => {
     const { cookie } = loginAs();
-    await request(app).get("/file/nope").set("Cookie", cookie).expect(400);
+    await request(app).get("/files/nope").set("Cookie", cookie).expect(400);
   });
 
   it("returns 404 when the file is not the caller's", async () => {
     const { cookie, user } = loginAs();
     FileMock.findOne.mockReturnValue(query(null));
-    await request(app).get(`/file/${VALID_ID}`).set("Cookie", cookie).expect(404);
+    await request(app).get(`/files/${VALID_ID}`).set("Cookie", cookie).expect(404);
     expect(FileMock.findOne).toHaveBeenCalledWith({ _id: VALID_ID, userId: user._id });
     expect(createGetSignedUrl).not.toHaveBeenCalled();
   });
@@ -40,7 +40,7 @@ describe("GET /file/:id", () => {
     FileMock.findOne.mockReturnValue(query({ extension: ".pdf", name: "report.pdf" }));
     createGetSignedUrl.mockResolvedValue("https://signed.example/report");
 
-    const res = await request(app).get(`/file/${VALID_ID}`).set("Cookie", cookie).expect(302);
+    const res = await request(app).get(`/files/${VALID_ID}`).set("Cookie", cookie).expect(302);
 
     expect(res.headers.location).toBe("https://signed.example/report");
     expect(createGetSignedUrl).toHaveBeenCalledWith({
@@ -55,23 +55,23 @@ describe("GET /file/:id", () => {
     FileMock.findOne.mockReturnValue(query({ extension: ".pdf", name: "report.pdf" }));
     createGetSignedUrl.mockResolvedValue("https://signed.example/dl");
 
-    await request(app).get(`/file/${VALID_ID}?action=download`).set("Cookie", cookie).expect(302);
+    await request(app).get(`/files/${VALID_ID}?action=download`).set("Cookie", cookie).expect(302);
 
     expect(createGetSignedUrl).toHaveBeenCalledWith(expect.objectContaining({ download: true }));
   });
 });
 
-describe("PATCH /file/:id (rename)", () => {
+describe("PATCH /files/:fileId (rename)", () => {
   it("validates the new name", async () => {
     const { cookie } = loginAs();
-    const res = await request(app).patch(`/file/${VALID_ID}`).set("Cookie", cookie).send({}).expect(400);
+    const res = await request(app).patch(`/files/${VALID_ID}`).set("Cookie", cookie).send({}).expect(400);
     expect(res.body.error).toBeTruthy();
   });
 
   it("returns 404 for a file that is not the caller's", async () => {
     const { cookie } = loginAs();
     FileMock.findOne.mockResolvedValue(null);
-    await request(app).patch(`/file/${VALID_ID}`).set("Cookie", cookie).send({ newFilename: "x.txt" }).expect(404);
+    await request(app).patch(`/files/${VALID_ID}`).set("Cookie", cookie).send({ newFilename: "x.txt" }).expect(404);
   });
 
   it("renames the file with a sanitised name", async () => {
@@ -79,7 +79,7 @@ describe("PATCH /file/:id (rename)", () => {
     const file = { name: "old.txt", save: vi.fn().mockResolvedValue(undefined) };
     FileMock.findOne.mockResolvedValue(file);
     await request(app)
-      .patch(`/file/${VALID_ID}`)
+      .patch(`/files/${VALID_ID}`)
       .set("Cookie", cookie)
       .send({ newFilename: "<script>x</script>new.txt" })
       .expect(200);
@@ -88,11 +88,11 @@ describe("PATCH /file/:id (rename)", () => {
   });
 });
 
-describe("DELETE /file/:id", () => {
+describe("DELETE /files/:fileId", () => {
   it("returns 404 for a file that is not the caller's", async () => {
     const { cookie } = loginAs();
     FileMock.findOne.mockReturnValue(query(null));
-    await request(app).delete(`/file/${VALID_ID}`).set("Cookie", cookie).expect(404);
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(404);
     expect(deleteR2File).not.toHaveBeenCalled();
   });
 
@@ -103,7 +103,7 @@ describe("DELETE /file/:id", () => {
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
     deleteR2File.mockResolvedValue({});
 
-    await request(app).delete(`/file/${VALID_ID}`).set("Cookie", cookie).expect(200);
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
 
     expect(FileMock.findByIdAndDelete).toHaveBeenCalledWith(VALID_ID);
     expect(deleteR2File).toHaveBeenCalledWith({ key: `${VALID_ID}.png`, userId: user._id });
@@ -118,10 +118,10 @@ describe("DELETE /file/:id", () => {
   });
 });
 
-describe("POST /file/upload/initiate", () => {
+describe("POST /files/uploads/initiate", () => {
   const parentId = oid();
   const initiate = (cookie, body) =>
-    request(app).post("/file/upload/initiate").set("Cookie", cookie).send(body);
+    request(app).post("/files/uploads/initiate").set("Cookie", cookie).send(body);
 
   it("returns 404 when the target folder is not the caller's", async () => {
     const { cookie } = loginAs();
@@ -207,9 +207,9 @@ describe("POST /file/upload/initiate", () => {
   });
 });
 
-describe("POST /file/upload/complete", () => {
-  const complete = (cookie, body) =>
-    request(app).post("/file/upload/complete").set("Cookie", cookie).send(body);
+describe("POST /files/uploads/:uploadId/complete", () => {
+  const complete = (cookie, uploadId = VALID_ID) =>
+    request(app).post(`/files/uploads/${uploadId}/complete`).set("Cookie", cookie);
 
   const pendingFile = (overrides = {}) => ({
     size: 100,
@@ -221,16 +221,22 @@ describe("POST /file/upload/complete", () => {
     ...overrides,
   });
 
+  it("rejects an invalid upload id", async () => {
+    const { cookie } = loginAs();
+    await complete(cookie, "nope").expect(400);
+    expect(FileMock.findOne).not.toHaveBeenCalled();
+  });
+
   it("returns 404 for an unknown file", async () => {
     const { cookie } = loginAs();
     FileMock.findOne.mockResolvedValue(null);
-    await complete(cookie, { fileId: VALID_ID }).expect(404);
+    await complete(cookie).expect(404);
   });
 
   it("returns 400 when the upload was already completed", async () => {
     const { cookie } = loginAs();
     FileMock.findOne.mockResolvedValue(pendingFile({ isUploading: false }));
-    const res = await complete(cookie, { fileId: VALID_ID }).expect(400);
+    const res = await complete(cookie).expect(400);
     expect(res.body.error).toBe("Upload already completed");
   });
 
@@ -241,7 +247,7 @@ describe("POST /file/upload/complete", () => {
     getR2FileMetaData.mockResolvedValue({ ContentLength: 100 });
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
 
-    await complete(cookie, { fileId: VALID_ID }).expect(200);
+    await complete(cookie).expect(200);
 
     expect(file.isUploading).toBe(false);
     expect(file.save).toHaveBeenCalledTimes(1);
@@ -262,7 +268,7 @@ describe("POST /file/upload/complete", () => {
     getR2FileMetaData.mockResolvedValue({ ContentLength: 999 });
     deleteR2File.mockResolvedValue({});
 
-    const res = await complete(cookie, { fileId: VALID_ID }).expect(400);
+    const res = await complete(cookie).expect(400);
 
     expect(res.body.error).toBe("File size does not match!");
     expect(file.deleteOne).toHaveBeenCalledTimes(1);
@@ -281,21 +287,27 @@ describe("POST /file/upload/complete", () => {
     getR2FileMetaData.mockRejectedValue(new Error("NotFound"));
     deleteR2File.mockResolvedValue({});
 
-    const res = await complete(cookie, { fileId: VALID_ID }).expect(400);
+    const res = await complete(cookie).expect(400);
 
     expect(res.body.error).toBe("File could not be uploaded properly");
     expect(file.deleteOne).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("POST /file/upload/cancel", () => {
-  const cancel = (cookie, body) =>
-    request(app).post("/file/upload/cancel").set("Cookie", cookie).send(body);
+describe("POST /files/uploads/:uploadId/cancel", () => {
+  const cancel = (cookie, uploadId = VALID_ID) =>
+    request(app).post(`/files/uploads/${uploadId}/cancel`).set("Cookie", cookie);
+
+  it("rejects an invalid upload id", async () => {
+    const { cookie } = loginAs();
+    await cancel(cookie, "nope").expect(400);
+    expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
+  });
 
   it("returns 404 when there is no matching unfinished upload", async () => {
     const { cookie, user } = loginAs();
     FileMock.findOneAndDelete.mockReturnValue(query(null));
-    await cancel(cookie, { fileId: VALID_ID }).expect(404);
+    await cancel(cookie).expect(404);
     expect(FileMock.findOneAndDelete).toHaveBeenCalledWith({
       _id: VALID_ID,
       userId: user._id,
@@ -308,7 +320,7 @@ describe("POST /file/upload/cancel", () => {
     FileMock.findOneAndDelete.mockReturnValue(query({ extension: ".mp4", size: 777 }));
     deleteR2File.mockResolvedValue({});
 
-    const res = await cancel(cookie, { fileId: VALID_ID }).expect(200);
+    const res = await cancel(cookie).expect(200);
 
     expect(res.body.message).toBe("Upload cancelled");
     expect(UserMock.updateOne).toHaveBeenCalledWith(
@@ -322,6 +334,6 @@ describe("POST /file/upload/cancel", () => {
     const { cookie } = loginAs();
     FileMock.findOneAndDelete.mockReturnValue(query({ extension: ".mp4", size: 1 }));
     deleteR2File.mockRejectedValue(new Error("R2 down"));
-    await cancel(cookie, { fileId: VALID_ID }).expect(500);
+    await cancel(cookie).expect(500);
   });
 });

@@ -1,24 +1,12 @@
-import { PLAN_DETAILS } from "../config/plans.js";
 import redisClient from "../config/redis.js";
 import Directory from "../models/directoryModel.js";
 import File from "../models/fileModel.js";
-import Subscription from "../models/subscriptionModel.js";
 import User from "../models/userModel.js";
 import { deleteR2Files, deleteProfilePicture, getProfilePictureKeyFromURL, isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
 import { getTargetUser } from "../utils/getTargetUser.js";
-import { isPremiumActive } from "../utils/isPremiumActive.js";
 import { canAssignRole } from "../utils/permissions.js";
-import { roleSchema } from "../validators/authSchema.js";
+import { roleSchema, userStatusSchema } from "../validators/authSchema.js";
 import { deleteUserSessions } from "../utils/sessionUtils.js";
-
-const LIVE_SUBSCRIPTION_STATUSES = [
-    "created",
-    "authenticated",
-    "active",
-    "pending",
-    "paused",
-    "cancelled",
-];
 
 export const getAllUsers = async (req, res) => {
     const allUsers = await User.find()
@@ -55,7 +43,7 @@ export const getAllUsers = async (req, res) => {
     return res.status(200).json(transformedUsers);
 };
 
-export const logoutByAdmin = async (req, res) => {
+export const revokeUserSessions = async (req, res) => {
     const target = await getTargetUser(req, res);
 
     if (!target) return;
@@ -63,16 +51,31 @@ export const logoutByAdmin = async (req, res) => {
     await deleteUserSessions(target._id);
 
     return res.json({
-        message: "User logged out",
+        message: "User logged out from all devices",
     });
 };
 
-export const softDelete = async (req, res) => {
+export const updateUserStatus = async (req, res) => {
+    const { success, data, error } =
+        userStatusSchema.safeParse(req.body);
+
+    if (!success) {
+        return res.status(400).json({
+            error: error.issues[0].message,
+        });
+    }
+
+    return data.isDeleted
+        ? deactivateUser(req, res)
+        : reactivateUser(req, res);
+};
+
+const deactivateUser = async (req, res) => {
     const { userId } = req.params;
 
     if (req.user._id.toString() === userId) {
         return res.status(403).json({
-            error: "Cannot delete yourself",
+            error: "Cannot deactivate yourself!",
         });
     }
 
@@ -86,16 +89,29 @@ export const softDelete = async (req, res) => {
     await deleteUserSessions(userId);
 
     return res.json({
-        message: "User deleted",
+        message: "User deactivated successfully",
     });
 };
 
-export const hardDelete = async (req, res) => {
+const reactivateUser = async (req, res) => {
+    const target = await getTargetUser(req, res);
+
+    if (!target) return;
+
+    target.isDeleted = false;
+    await target.save();
+
+    return res.json({
+        message: "User recovered successfully",
+    });
+};
+
+export const permanentlyDeleteUser = async (req, res) => {
     const { userId } = req.params;
 
     if (req.user._id.toString() === userId) {
         return res.status(403).json({
-            error: "Cannot delete yourself",
+            error: "Cannot delete yourself!",
         });
     }
 
@@ -134,25 +150,12 @@ export const hardDelete = async (req, res) => {
     });
 };
 
-export const recoverUserByAdmin = async (req, res) => {
-    const target = await getTargetUser(req, res);
-
-    if (!target) return;
-
-    target.isDeleted = false;
-    await target.save();
-
-    return res.json({
-        message: "User recovered successfully",
-    });
-};
-
 export const updateUserRole = async (req, res) => {
     const { userId } = req.params;
 
     if (req.user._id.toString() === userId) {
         return res.status(403).json({
-            error: "Cannot change your own role",
+            error: "Cannot change your own role!",
         });
     }
 
@@ -176,7 +179,7 @@ export const updateUserRole = async (req, res) => {
         )
     ) {
         return res.status(403).json({
-            error: "Cannot assign this role",
+            error: "Cannot assign this role!",
         });
     }
 
@@ -189,127 +192,6 @@ export const updateUserRole = async (req, res) => {
     await target.save();
 
     return res.json({
-        message: "Role updated",
+        message: "Role assigned successfully",
     });
-};
-
-export const getPlansDashboard = async (req, res, next) => {
-    try {
-        const [totalUsers, latestSubsPerUser, recentSubsRaw, storageUsers] = await Promise.all([
-            User.countDocuments(),
-
-            // Latest subscription per user (only "live" statuses), newest first.
-            Subscription.aggregate([
-                { $match: { status: { $in: LIVE_SUBSCRIPTION_STATUSES } } },
-                { $sort: { createdAt: -1 } },
-                { $group: { _id: "$userId", doc: { $first: "$$ROOT" } } },
-                { $replaceRoot: { newRoot: "$doc" } },
-            ]),
-
-            // Most recent subscription activity overall, regardless of user.
-            Subscription.find()
-                .sort({ createdAt: -1 })
-                .limit(10)
-                .populate("userId", "name email picture")
-                .lean(),
-
-            User.find()
-                .select("name email picture maxStorageInBytes usedStorageInBytes")
-                .lean(),
-        ]);
-
-        // Hydrate user info for the per-user latest-subscription list.
-        const userIds = latestSubsPerUser.map((s) => s.userId);
-        const subUsers = await User.find({ _id: { $in: userIds } })
-            .select("name email picture isDeleted")
-            .lean();
-        const userById = new Map(subUsers.map((u) => [u._id.toString(), u]));
-        const storageByUserId = new Map(storageUsers.map((u) => [u._id.toString(), u]));
-
-        const activePlans = [];
-        let monthlyRevenue = 0;
-        let yearlyRevenue = 0;
-        let premiumUsers = 0;
-
-        for (const sub of latestSubsPerUser) {
-            const owner = userById.get(sub.userId?.toString());
-            if (!owner || owner.isDeleted) continue;
-
-            const planInfo = PLAN_DETAILS[sub.planId] || null;
-            const premiumActive = isPremiumActive(sub);
-
-            if (premiumActive) {
-                premiumUsers += 1;
-                const storageInfo = storageByUserId.get(owner._id.toString());
-                activePlans.push({
-                    id: owner._id,
-                    name: owner.name,
-                    email: owner.email,
-                    picture: owner.picture,
-                    planName: planInfo?.name || "Unknown",
-                    cycle: planInfo?.cycle === "yearly" ? "Yearly" : "Monthly",
-                    status: sub.status,
-                    usedStorageInBytes: storageInfo?.usedStorageInBytes ?? 0,
-                    maxStorageInBytes: storageInfo?.maxStorageInBytes ?? 0,
-                    renewalDate: sub.currentEnd,
-                });
-            }
-
-            // Revenue counts only subscriptions actively billing right now.
-            if (sub.status === "active" && planInfo) {
-                if (planInfo.cycle === "yearly") yearlyRevenue += planInfo.price;
-                else monthlyRevenue += planInfo.price;
-            }
-        }
-
-        activePlans.sort((a, b) => new Date(a.renewalDate) - new Date(b.renewalDate));
-
-        // Top 5 users closest to running out of storage.
-        const storageAlerts = storageUsers
-            .filter((u) => u.maxStorageInBytes > 0)
-            .map((u) => ({
-                id: u._id,
-                name: u.name,
-                email: u.email,
-                picture: u.picture,
-                usedStorageInBytes: u.usedStorageInBytes || 0,
-                maxStorageInBytes: u.maxStorageInBytes,
-                percentUsed: Math.min(
-                    ((u.usedStorageInBytes || 0) / u.maxStorageInBytes) * 100,
-                    100
-                ),
-            }))
-            .sort((a, b) => b.percentUsed - a.percentUsed)
-            .slice(0, 6);
-
-        const recentSubscriptions = recentSubsRaw
-            .filter((s) => s.userId)
-            .map((s) => {
-                const planInfo = PLAN_DETAILS[s.planId] || null;
-                return {
-                    id: s._id,
-                    name: s.userId.name,
-                    email: s.userId.email,
-                    picture: s.userId.picture,
-                    planName: planInfo?.name || "Unknown",
-                    cycle: planInfo?.cycle === "yearly" ? "Yearly" : "Monthly",
-                    status: s.status,
-                    createdAt: s.createdAt,
-                };
-            });
-
-        return res.json({
-            summary: {
-                totalUsers,
-                premiumUsers,
-                monthlyRevenue,
-                yearlyRevenue,
-            },
-            activePlans,
-            storageAlerts,
-            recentSubscriptions,
-        });
-    } catch (err) {
-        next(err);
-    }
 };

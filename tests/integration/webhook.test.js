@@ -44,7 +44,7 @@ const body = (event, entityOverrides = {}, extraPayload = {}) => ({
 function send(payload, { signature, raw } = {}) {
   const rawBody = raw ?? JSON.stringify(payload);
   return request(app)
-    .post("/webhook/razorpay")
+    .post("/webhooks/razorpay")
     .set("Content-Type", "application/json")
     .set("x-razorpay-signature", signature ?? hmacHex(SECRET, rawBody))
     .send(rawBody);
@@ -55,10 +55,10 @@ const logged = (status, error = null) =>
 
 const settled = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-describe("POST /webhook/razorpay — signature verification", () => {
+describe("POST /webhooks/razorpay — signature verification", () => {
   it("rejects requests without a signature header", async () => {
     await request(app)
-      .post("/webhook/razorpay")
+      .post("/webhooks/razorpay")
       .set("Content-Type", "application/json")
       .send(JSON.stringify(body("subscription.activated")))
       .expect(400);
@@ -102,7 +102,7 @@ describe("POST /webhook/razorpay — signature verification", () => {
   });
 });
 
-describe("POST /webhook/razorpay — event processing", () => {
+describe("POST /webhooks/razorpay — event processing", () => {
   it("logs each event under a unique key before processing (idempotency)", async () => {
     await send(body("subscription.activated")).expect(200);
     await vi.waitFor(() => expect(WebhookEventMock.create).toHaveBeenCalled());

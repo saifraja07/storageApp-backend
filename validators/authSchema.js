@@ -63,3 +63,9 @@ export const roleSchema = z.object({
     error: "Please enter valid role!",
   }),
 });
+
+export const userStatusSchema = z.object({
+  isDeleted: z.boolean({
+    error: "Please provide a valid status!",
+  }),
+});

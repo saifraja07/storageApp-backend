@@ -2,14 +2,15 @@ import mongoose, { Types } from "mongoose";
 import OTP from "../models/otpModel.js"
 import User from "../models/userModel.js";
 import Directory from "../models/directoryModel.js";
+import redisClient from "../config/redis.js";
 import { getUserFromAuthCode } from "../services/googleAuthService.js"
 import { sendOtpService } from "../services/sendOtpService.js"
-import { sendOtpSchema, verifyOtpSchema } from "../validators/authSchema.js";
-import { enforceDeviceLimit, createSession } from "../utils/sessionUtils.js";
+import { changePasswordSchema, loginSchema, registerSchema, sendOtpSchema, verifyOtpSchema } from "../validators/authSchema.js";
+import { enforceDeviceLimit, createSession, deleteUserSessions } from "../utils/sessionUtils.js";
 import { isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
 
-
-const expiryTime = 1000 * 60 * 60 * 24 * 7;
+const tracer = trace.getTracer("storageApp-auth");
 
 
 export const sendOtp = async (req, res) => {
@@ -118,3 +119,188 @@ export const loginWithGoogle = async (req, res, next) => {
         await transactionSession.endSession();
     }
 }
+
+export const register = async (req, res, next) => {
+    const parsed = registerSchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({
+            error: parsed.error.issues[0].message,
+        });
+    }
+    const { name, email, password, otp } = parsed.data;
+
+    const otpRecord = await OTP.findOneAndDelete({ email, otp })
+    if (!otpRecord) {
+        return res.status(400).json({ error: "Invalid or Expired Otp!" })
+    }
+
+    const rootDirId = new Types.ObjectId();
+    const userId = new Types.ObjectId();
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction();
+        await Directory.insertOne(
+            {
+                _id: rootDirId,
+                name: `root-${email}`,
+                parentDirId: null,
+                userId,
+            },
+            { session },
+        );
+        await User.insertOne(
+            {
+                _id: userId,
+                name,
+                email,
+                password,
+                rootDirId,
+            },
+            { session },
+        );
+        await session.commitTransaction();
+        return res.status(201).json({ message: "User Registered!" });
+    } catch (err) {
+        await session.abortTransaction();
+        if (err.code === 121) {
+            return res
+                .status(400)
+                .json({ error: "Invalid Input! please enter valid details" });
+        } else if (err.code === 11000) {
+            return res
+                .status(409)
+                .json({ error: "User already exists!, Sign in to continue..." });
+        } else {
+            next(err);
+        }
+    } finally {
+        await session.endSession();
+    }
+};
+
+export const login = async (req, res) => {
+    const parsed = loginSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+        return res.status(400).json({
+            error: "Invalid Credentials",
+        });
+    }
+
+    const { email, password } = parsed.data;
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+        return res.status(404).json({
+            error: "Invalid email or password!",
+        });
+    } else if (user.isDeleted) {
+        return res.status(403).json({
+            error: "Your account is disabled! Contact Admin to recover.",
+        });
+    } else if (!user.password) {
+        return res.status(400).json({
+            error: "This account uses Google Sign-In. Please continue with Google.",
+        });
+    }
+
+    const isPasswordValid = await tracer.startActiveSpan(
+        "auth.compare_password",
+        async (span) => {
+            try {
+                const result = await user.comparePassword(password);
+
+                span.setStatus({
+                    code: SpanStatusCode.OK,
+                });
+
+                return result;
+            } catch (error) {
+                span.recordException(error);
+
+                span.setStatus({
+                    code: SpanStatusCode.ERROR,
+                });
+
+                throw error;
+            } finally {
+                span.end();
+            }
+        },
+    );
+
+    if (!isPasswordValid) {
+        return res.status(404).json({
+            error: "Invalid email or password!",
+        });
+    }
+
+    await enforceDeviceLimit(user.id, user.accessDevice);
+    await createSession(res, user._id);
+
+    return res.status(200).json({
+        message: "Login Successful",
+    });
+};
+
+export const logout = async (req, res) => {
+    await redisClient.del(`session:${req.signedCookies.sid}`)
+    res.clearCookie("sid");
+    return res.json({ message: "User Logged Out!" });
+};
+
+export const logoutAll = async (req, res) => {
+    await deleteUserSessions(req.user._id)
+    res.clearCookie("sid");
+    return res.status(200).json({
+        message: "Logged out from all devices!"
+    });
+};
+
+export const changePassword = async (req, res) => {
+    const parsed = changePasswordSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+        return res.status(400).json({
+            error: parsed.error.issues[0].message,
+        });
+    };
+    const data = parsed.data;
+
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+        return res.status(404).json({
+            error: "User not found.",
+        });
+    };
+
+    const hasPassword = !!user.password;
+
+    if (hasPassword) {
+        if (!data.currentPassword) {
+            return res.status(400).json({
+                error: "Current password is required.",
+            });
+        };
+
+        const ok = await user.comparePassword(data.currentPassword);
+
+        if (!ok) {
+            return res.status(400).json({
+                error: "Current password is incorrect.",
+            });
+        }
+    };
+
+    user.password = data.newPassword;
+
+    await user.save();
+
+    return res.json({
+        message: hasPassword
+            ? "Password changed successfully."
+            : "Password set successfully.",
+    });
+};

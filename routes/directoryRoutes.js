@@ -12,12 +12,13 @@ import {
 const router = express.Router();
 
 router.param("parentDirId", validateIdMiddleware);
-router.param("id", validateIdMiddleware);
+router.param("directoryId", validateIdMiddleware);
 
-router.get("/path/:id", getDirectoryPath);
-router.get("/{:id}", readDirectory);
-router.post("/{:parentDirId}", sanitizeInputs(["dirname"]), createDirectory);
-router.patch("/:id", sanitizeInputs(["newDirName"]), renameDirectory);
-router.delete("/:id", deleteDirectory);
+router.get("/{:directoryId}", readDirectory);
+router.get("/:directoryId/path", getDirectoryPath);
+router.post("/", sanitizeInputs(["dirname"]), createDirectory);
+router.post("/:parentDirId/children", sanitizeInputs(["dirname"]), createDirectory);
+router.patch("/:directoryId", sanitizeInputs(["newDirName"]), renameDirectory);
+router.delete("/:directoryId", deleteDirectory);
 
 export default router;

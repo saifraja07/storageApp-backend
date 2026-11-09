@@ -40,9 +40,9 @@ beforeEach(() => {
 
 const authed = (method, path) => request(app)[method](path).set("Cookie", cookie);
 
-describe("POST /subscription (create)", () => {
+describe("POST /subscriptions (create)", () => {
   it("rejects unknown / tampered plan ids", async () => {
-    const res = await authed("post", "/subscription").send({ planId: "plan_FAKE" }).expect(400);
+    const res = await authed("post", "/subscriptions").send({ planId: "plan_FAKE" }).expect(400);
     expect(res.body.error).toBe("Invalid plan selected.");
     expect(rzp.subscriptions.create).not.toHaveBeenCalled();
   });
@@ -51,7 +51,7 @@ describe("POST /subscription (create)", () => {
     SubscriptionMock.findOne.mockReturnValueOnce(
       query({ status: "active", currentEnd: future() }),
     );
-    const res = await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(409);
+    const res = await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(409);
     expect(res.body.error).toMatch(/already have an active subscription/i);
     expect(rzp.subscriptions.create).not.toHaveBeenCalled();
   });
@@ -60,7 +60,7 @@ describe("POST /subscription (create)", () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
     rzp.subscriptions.create.mockResolvedValue({ id: "sub_new", status: "created" });
 
-    const res = await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(201);
+    const res = await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(201);
 
     expect(res.body).toEqual({ subscriptionId: "sub_new" });
     expect(rzp.subscriptions.create).toHaveBeenCalledWith(
@@ -83,7 +83,7 @@ describe("POST /subscription (create)", () => {
       .mockReturnValueOnce(query({ status: "active", currentEnd: past() }))
       .mockReturnValueOnce(query(null));
     rzp.subscriptions.create.mockResolvedValue({ id: "sub_new", status: "created" });
-    await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(201);
+    await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(201);
   });
 
   it("reuses a checkout the user already started (no duplicate Razorpay subscription)", async () => {
@@ -92,7 +92,7 @@ describe("POST /subscription (create)", () => {
       .mockReturnValueOnce(query({ _id: oid(), subscriptionId: "sub_pending" }));
     rzp.subscriptions.fetch.mockResolvedValue({ status: "created" });
 
-    const res = await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(200);
+    const res = await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(200);
 
     expect(res.body).toEqual({ subscriptionId: "sub_pending" });
     expect(rzp.subscriptions.create).not.toHaveBeenCalled();
@@ -106,7 +106,7 @@ describe("POST /subscription (create)", () => {
     rzp.subscriptions.fetch.mockRejectedValue(new Error("not found"));
     rzp.subscriptions.create.mockResolvedValue({ id: "sub_new", status: "created" });
 
-    await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(201);
+    await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(201);
 
     expect(SubscriptionMock.deleteOne).toHaveBeenCalledWith({ _id: stale._id });
   });
@@ -117,7 +117,7 @@ describe("POST /subscription (create)", () => {
     rzp.subscriptions.fetch.mockResolvedValue({ status: "cancelled" });
     rzp.subscriptions.create.mockResolvedValue({ id: "sub_new", status: "created" });
 
-    await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(201);
+    await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(201);
 
     expect(SubscriptionMock.deleteOne).toHaveBeenCalledWith({ _id: old._id });
   });
@@ -125,15 +125,15 @@ describe("POST /subscription (create)", () => {
   it("returns a generic 500 when Razorpay fails", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
     rzp.subscriptions.create.mockRejectedValue(new Error("razorpay secret failure"));
-    const res = await authed("post", "/subscription").send({ planId: PLAN_ID }).expect(500);
+    const res = await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(500);
     expect(res.body.message).toBe("Internal Server Error");
   });
 });
 
-describe("GET /subscription/active", () => {
+describe("GET /subscriptions/active", () => {
   it("returns null when the user never subscribed", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    const res = await authed("get", "/subscription/active").expect(200);
+    const res = await authed("get", "/subscriptions/active").expect(200);
     expect(res.body).toEqual({ subscription: null, isPremiumActive: false });
   });
 
@@ -141,7 +141,7 @@ describe("GET /subscription/active", () => {
     SubscriptionMock.findOne.mockReturnValue(
       query({ subscriptionId: "sub_1", status: "cancelled", currentEnd: future() }),
     );
-    const res = await authed("get", "/subscription/active").expect(200);
+    const res = await authed("get", "/subscriptions/active").expect(200);
     expect(res.body.isPremiumActive).toBe(true);
     expect(res.body.subscription.subscriptionId).toBe("sub_1");
   });
@@ -150,18 +150,18 @@ describe("GET /subscription/active", () => {
     SubscriptionMock.findOne.mockReturnValue(
       query({ subscriptionId: "sub_1", status: "active", currentEnd: past() }),
     );
-    const res = await authed("get", "/subscription/active").expect(200);
+    const res = await authed("get", "/subscriptions/active").expect(200);
     expect(res.body.isPremiumActive).toBe(false);
   });
 
   it("only looks up the logged-in user's subscriptions", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    await authed("get", "/subscription/active").expect(200);
+    await authed("get", "/subscriptions/active").expect(200);
     expect(SubscriptionMock.findOne.mock.calls[0][0].userId).toBe(user._id);
   });
 });
 
-describe("POST /subscription/verify (payment signature)", () => {
+describe("POST /subscriptions/verify (payment signature)", () => {
   const fields = {
     razorpay_subscription_id: "sub_1",
     razorpay_payment_id: "pay_1",
@@ -169,13 +169,13 @@ describe("POST /subscription/verify (payment signature)", () => {
   const goodSignature = () => hmacHex("rzp_test_secret", "pay_1|sub_1");
 
   it("requires all three verification fields", async () => {
-    const res = await authed("post", "/subscription/verify").send(fields).expect(400);
+    const res = await authed("post", "/subscriptions/verify").send(fields).expect(400);
     expect(res.body.error).toBe("Missing verification fields.");
   });
 
   it("returns 404 when the subscription does not belong to the user", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    await authed("post", "/subscription/verify")
+    await authed("post", "/subscriptions/verify")
       .send({ ...fields, razorpay_signature: goodSignature() })
       .expect(404);
     expect(SubscriptionMock.findOne).toHaveBeenCalledWith({
@@ -186,7 +186,7 @@ describe("POST /subscription/verify (payment signature)", () => {
 
   it("rejects an invalid signature", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_1" }));
-    const res = await authed("post", "/subscription/verify")
+    const res = await authed("post", "/subscriptions/verify")
       .send({ ...fields, razorpay_signature: "f".repeat(64) })
       .expect(400);
     expect(res.body.error).toBe("Invalid payment signature.");
@@ -194,7 +194,7 @@ describe("POST /subscription/verify (payment signature)", () => {
 
   it("confirms a genuine signature — without activating premium (the webhook does that)", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_1" }));
-    const res = await authed("post", "/subscription/verify")
+    const res = await authed("post", "/subscriptions/verify")
       .send({ ...fields, razorpay_signature: goodSignature() })
       .expect(200);
     expect(res.body).toEqual({ verified: true });
@@ -203,14 +203,14 @@ describe("POST /subscription/verify (payment signature)", () => {
   });
 });
 
-describe("POST /subscription/:subscriptionId/cancel", () => {
+describe("POST /subscriptions/:subscriptionId/cancel", () => {
   it("rejects ids that are not Razorpay subscription ids", async () => {
-    await authed("post", "/subscription/abc123/cancel").expect(400);
+    await authed("post", "/subscriptions/abc123/cancel").expect(400);
   });
 
   it("returns 404 for someone else's subscription", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    await authed("post", "/subscription/sub_x/cancel").expect(404);
+    await authed("post", "/subscriptions/sub_x/cancel").expect(404);
     expect(rzp.subscriptions.cancel).not.toHaveBeenCalled();
   });
 
@@ -218,7 +218,7 @@ describe("POST /subscription/:subscriptionId/cancel", () => {
     "returns 409 for a %s subscription",
     async (status) => {
       SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status }));
-      await authed("post", "/subscription/sub_x/cancel").expect(409);
+      await authed("post", "/subscriptions/sub_x/cancel").expect(409);
       expect(rzp.subscriptions.cancel).not.toHaveBeenCalled();
     },
   );
@@ -226,7 +226,7 @@ describe("POST /subscription/:subscriptionId/cancel", () => {
   it("cancels an unpaid checkout immediately", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "created" }));
     rzp.subscriptions.cancel.mockResolvedValue({});
-    const res = await authed("post", "/subscription/sub_x/cancel").expect(200);
+    const res = await authed("post", "/subscriptions/sub_x/cancel").expect(200);
     expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", true);
     expect(res.body.message).toBe("Subscription cancelled.");
   });
@@ -234,7 +234,7 @@ describe("POST /subscription/:subscriptionId/cancel", () => {
   it("cancels an active subscription at the end of the billing cycle", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "active" }));
     rzp.subscriptions.cancel.mockResolvedValue({});
-    const res = await authed("post", "/subscription/sub_x/cancel").expect(200);
+    const res = await authed("post", "/subscriptions/sub_x/cancel").expect(200);
     expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", false);
     expect(res.body.message).toMatch(/retain premium access/i);
     expect(SubscriptionMock.updateOne).toHaveBeenCalledWith(
@@ -246,36 +246,36 @@ describe("POST /subscription/:subscriptionId/cancel", () => {
   it("does not mark the subscription cancelled locally when Razorpay fails", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "active" }));
     rzp.subscriptions.cancel.mockRejectedValue(new Error("rzp down"));
-    await authed("post", "/subscription/sub_x/cancel").expect(500);
+    await authed("post", "/subscriptions/sub_x/cancel").expect(500);
     expect(SubscriptionMock.updateOne).not.toHaveBeenCalled();
   });
 });
 
-describe("GET /subscription/:subscriptionId/update-payment", () => {
+describe("GET /subscriptions/:subscriptionId/payment-method/update-link", () => {
   it("validates the id and ownership", async () => {
-    await authed("get", "/subscription/abc/update-payment").expect(400);
+    await authed("get", "/subscriptions/abc/payment-method/update-link").expect(400);
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    await authed("get", "/subscription/sub_x/update-payment").expect(404);
+    await authed("get", "/subscriptions/sub_x/payment-method/update-link").expect(404);
   });
 
   it("refuses for subscriptions in a non-updatable state", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "created" }));
-    await authed("get", "/subscription/sub_x/update-payment").expect(409);
+    await authed("get", "/subscriptions/sub_x/payment-method/update-link").expect(409);
   });
 
   it("returns Razorpay's hosted update URL", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "active" }));
     rzp.subscriptions.fetch.mockResolvedValue({ short_url: "https://rzp.io/i/abc" });
-    const res = await authed("get", "/subscription/sub_x/update-payment").expect(200);
+    const res = await authed("get", "/subscriptions/sub_x/payment-method/update-link").expect(200);
     expect(res.body).toEqual({ updateUrl: "https://rzp.io/i/abc" });
   });
 });
 
-describe("GET /subscription/:subscriptionId/payments", () => {
+describe("GET /subscriptions/:subscriptionId/payments", () => {
   it("validates the id and ownership", async () => {
-    await authed("get", "/subscription/abc/payments").expect(400);
+    await authed("get", "/subscriptions/abc/payments").expect(400);
     SubscriptionMock.findOne.mockReturnValue(query(null));
-    await authed("get", "/subscription/sub_x/payments").expect(404);
+    await authed("get", "/subscriptions/sub_x/payments").expect(404);
   });
 
   it("maps Razorpay invoices (paise → rupees, epoch → ISO date)", async () => {
@@ -289,7 +289,7 @@ describe("GET /subscription/:subscriptionId/payments", () => {
       ],
     });
 
-    const res = await authed("get", "/subscription/sub_x/payments").expect(200);
+    const res = await authed("get", "/subscriptions/sub_x/payments").expect(200);
 
     expect(rzp.invoices.all).toHaveBeenCalledWith({ subscription_id: "sub_x" });
     expect(res.body.payments).toEqual([
@@ -315,7 +315,7 @@ describe("GET /subscription/:subscriptionId/payments", () => {
   it("returns an empty list when there are no invoices", async () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x" }));
     rzp.invoices.all.mockResolvedValue({});
-    const res = await authed("get", "/subscription/sub_x/payments").expect(200);
+    const res = await authed("get", "/subscriptions/sub_x/payments").expect(200);
     expect(res.body.payments).toEqual([]);
   });
 });

@@ -3,42 +3,16 @@ import File from "../models/fileModel.js";
 import Directory from "../models/directoryModel.js";
 import User from "../models/userModel.js";
 import { renameFileSchema } from "../validators/fileSchema.js";
+import { updateDirectorySize } from "../services/storageAccountingService.js";
 import { deleteR2File, createGetSignedUrl, createUploadSignedUrl, getR2FileMetaData } from "../services/cloudflareR2Service.js";
 
 
-export async function updateDirectorySize(parentId, deltaSize, rootDirId) {
-  const dir = await Directory.findById(parentId).select("path").lean();
-
-  if (!dir) return;
-
-  await Promise.all([
-    Directory.updateMany(
-      {
-        _id: {
-          $in: [rootDirId, ...dir.path, parentId],
-        },
-      },
-      {
-        $inc: { size: deltaSize },
-      }
-    ),
-    User.updateOne(
-      { rootDirId },
-      {
-        $inc: {
-          usedStorageInBytes: deltaSize,
-        },
-      }
-    ),
-  ]);
-}
-
 export const getFile = async (req, res) => {
-  const { id } = req.params;
+  const { fileId } = req.params;
 
   // Check if file exists & ownership verify
   const fileData = await File.findOne({
-    _id: id,
+    _id: fileId,
     userId: req.user._id,
   }).lean();
   if (!fileData) {
@@ -47,7 +21,7 @@ export const getFile = async (req, res) => {
 
   if (req.query.action === "download") {
     const fileUrl = await createGetSignedUrl({
-      key: `${id}${fileData.extension}`,
+      key: `${fileId}${fileData.extension}`,
       download: true,
       filename: fileData.name,
       userId: req.user._id
@@ -56,7 +30,7 @@ export const getFile = async (req, res) => {
   }
 
   const fileUrl = await createGetSignedUrl({
-    key: `${id}${fileData.extension}`,
+    key: `${fileId}${fileData.extension}`,
     filename: fileData.name,
     userId: req.user._id
   });
@@ -64,7 +38,7 @@ export const getFile = async (req, res) => {
 };
 
 export const renameFile = async (req, res, next) => {
-  const { id } = req.params;
+  const { fileId } = req.params;
   const { success, data, error } = renameFileSchema.safeParse(req.body)
 
   if (!success) {
@@ -73,7 +47,7 @@ export const renameFile = async (req, res, next) => {
   const { newFilename } = data;
 
   const fileData = await File.findOne({
-    _id: id,
+    _id: fileId,
     userId: req.user._id,
   });
   if (!fileData) {
@@ -85,9 +59,9 @@ export const renameFile = async (req, res, next) => {
 };
 
 export const deleteFile = async (req, res, next) => {
-  const { id } = req.params;
+  const { fileId } = req.params;
   const fileData = await File.findOne({
-    _id: id,
+    _id: fileId,
     userId: req.user._id,
   }).lean();
   if (!fileData) {
@@ -95,9 +69,9 @@ export const deleteFile = async (req, res, next) => {
   }
 
   await Promise.all([
-    File.findByIdAndDelete(id),
+    File.findByIdAndDelete(fileId),
     deleteR2File({
-      key: `${id}${fileData.extension}`,
+      key: `${fileId}${fileData.extension}`,
       userId: req.user._id
     })
   ]);
@@ -206,9 +180,9 @@ export const uploadInitiate = async (req, res) => {
   }
 }
 
-
 export const uploadComplete = async (req, res) => {
-  const { fileId } = req.body;
+  // The upload id is the pending File's _id (returned as `fileId` by uploadInitiate).
+  const { uploadId: fileId } = req.params;
   const file = await File.findOne({
     _id: fileId,
     userId: req.user._id,
@@ -290,7 +264,7 @@ export const uploadComplete = async (req, res) => {
 export const uploadCancel = async (req, res) => {
   try {
     const file = await File.findOneAndDelete({
-      _id: req.body.fileId,
+      _id: req.params.uploadId,
       userId: req.user._id,
       isUploading: true
     })
@@ -314,7 +288,7 @@ export const uploadCancel = async (req, res) => {
       ),
 
       deleteR2File({
-        key: `${req.body.fileId}${file.extension}`,
+        key: `${req.params.uploadId}${file.extension}`,
         userId: req.user._id,
       }),
     ]);
