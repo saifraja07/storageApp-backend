@@ -86,10 +86,12 @@ describe("POST /subscriptions (create)", () => {
     await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(201);
   });
 
-  it("reuses a checkout the user already started (no duplicate Razorpay subscription)", async () => {
+  it("reuses a checkout the user already started for the same plan (no duplicate Razorpay subscription)", async () => {
     SubscriptionMock.findOne
       .mockReturnValueOnce(query(null))
-      .mockReturnValueOnce(query({ _id: oid(), subscriptionId: "sub_pending" }));
+      .mockReturnValueOnce(
+        query({ _id: oid(), subscriptionId: "sub_pending", planId: PLAN_ID }),
+      );
     rzp.subscriptions.fetch.mockResolvedValue({ status: "created" });
 
     const res = await authed("post", "/subscriptions").send({ planId: PLAN_ID }).expect(200);
@@ -122,6 +124,88 @@ describe("POST /subscriptions (create)", () => {
     expect(SubscriptionMock.deleteOne).toHaveBeenCalledWith({ _id: old._id });
   });
 
+  describe("abandoned / in-flight checkouts", () => {
+    const PRO = "plan_T7QOKw1SWn3YA9";
+    const PREMIUM = "plan_T7QTobe7VSThyp";
+
+    it("does NOT reopen an abandoned checkout for a different plan — it cancels it and opens the plan the user picked", async () => {
+      const abandoned = { _id: oid(), subscriptionId: "sub_pro", planId: PRO };
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query(null))
+        .mockReturnValueOnce(query(abandoned));
+      rzp.subscriptions.fetch.mockResolvedValue({ status: "created" });
+      rzp.subscriptions.cancel.mockResolvedValue({});
+      rzp.subscriptions.create.mockResolvedValue({ id: "sub_premium", status: "created" });
+
+      const res = await authed("post", "/subscriptions").send({ planId: PREMIUM }).expect(201);
+
+      expect(res.body).toEqual({ subscriptionId: "sub_premium" });
+      expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_pro"); // immediate, not at cycle end
+      expect(SubscriptionMock.deleteOne).toHaveBeenCalledWith({ _id: abandoned._id });
+      expect(rzp.subscriptions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ plan_id: PREMIUM }),
+      );
+      expect(SubscriptionMock.create).toHaveBeenCalledWith(
+        expect.objectContaining({ subscriptionId: "sub_premium", planId: PREMIUM }),
+      );
+    });
+
+    it("still opens the right plan when Razorpay refuses to cancel the abandoned checkout", async () => {
+      const abandoned = { _id: oid(), subscriptionId: "sub_pro", planId: PRO };
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query(null))
+        .mockReturnValueOnce(query(abandoned));
+      rzp.subscriptions.fetch.mockResolvedValue({ status: "created" });
+      rzp.subscriptions.cancel.mockRejectedValue(new Error("cannot cancel"));
+      rzp.subscriptions.create.mockResolvedValue({ id: "sub_premium", status: "created" });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await authed("post", "/subscriptions").send({ planId: PREMIUM }).expect(201);
+
+      expect(SubscriptionMock.deleteOne).toHaveBeenCalledWith({ _id: abandoned._id });
+      expect(rzp.subscriptions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ plan_id: PREMIUM }),
+      );
+    });
+
+    it.each(["authenticated", "active", "pending", "paused"])(
+      "refuses to start another checkout while a paid-for one (%s on Razorpay) is still being processed — and keeps its record",
+      async (rzpStatus) => {
+        SubscriptionMock.findOne
+          .mockReturnValueOnce(query(null))
+          .mockReturnValueOnce(
+            query({ _id: oid(), subscriptionId: "sub_paid", planId: PRO }),
+          );
+        rzp.subscriptions.fetch.mockResolvedValue({ status: rzpStatus });
+
+        const res = await authed("post", "/subscriptions").send({ planId: PRO }).expect(409);
+
+        expect(res.body.error).toMatch(/still being processed/i);
+        expect(SubscriptionMock.deleteOne).not.toHaveBeenCalled();
+        expect(rzp.subscriptions.cancel).not.toHaveBeenCalled();
+        expect(rzp.subscriptions.create).not.toHaveBeenCalled();
+      },
+    );
+
+    it("blocks a new checkout while a cancelled plan is still paid for", async () => {
+      SubscriptionMock.findOne.mockReturnValueOnce(
+        query({ status: "cancelled", currentEnd: future() }),
+      );
+      const res = await authed("post", "/subscriptions").send({ planId: PREMIUM }).expect(409);
+      expect(res.body.error).toMatch(/stays active until it ends/i);
+      expect(rzp.subscriptions.create).not.toHaveBeenCalled();
+      expect(SubscriptionMock.findOne.mock.calls[0][0].status.$in).toContain("cancelled");
+    });
+
+    it("allows a new checkout once a cancelled plan's paid period has ended", async () => {
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query({ status: "cancelled", currentEnd: past() }))
+        .mockReturnValueOnce(query(null));
+      rzp.subscriptions.create.mockResolvedValue({ id: "sub_new", status: "created" });
+      await authed("post", "/subscriptions").send({ planId: PREMIUM }).expect(201);
+    });
+  });
+
   it("returns a generic 500 when Razorpay fails", async () => {
     SubscriptionMock.findOne.mockReturnValue(query(null));
     rzp.subscriptions.create.mockRejectedValue(new Error("razorpay secret failure"));
@@ -152,6 +236,12 @@ describe("GET /subscriptions/active", () => {
     );
     const res = await authed("get", "/subscriptions/active").expect(200);
     expect(res.body.isPremiumActive).toBe(false);
+  });
+
+  it("never returns an unfinished checkout (status created)", async () => {
+    SubscriptionMock.findOne.mockReturnValue(query(null));
+    await authed("get", "/subscriptions/active").expect(200);
+    expect(SubscriptionMock.findOne.mock.calls[0][0].status.$in).not.toContain("created");
   });
 
   it("only looks up the logged-in user's subscriptions", async () => {
