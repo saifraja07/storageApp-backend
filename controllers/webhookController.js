@@ -58,6 +58,15 @@ async function updateSub(subscriptionId, fields, extraFilter = {}) {
 }
 
 /** Persist or update the WebhookEvent log entry. */
+// A PAID event (activated / charged) for a subscription we have no record of means
+// a customer was charged but can't be given storage automatically. Never let that
+// pass as "processed" — make it loud so it can be reconciled by hand.
+async function flagUnmatchedPayment(logDoc, event, subscriptionId) {
+  const message = `${event} for ${subscriptionId}: no matching local subscription — payment needs manual reconciliation`;
+  console.error(`[webhook] ${message}`);
+  await markLog(logDoc, "failed", message);
+}
+
 async function markLog(logDoc, status, error = null) {
   if (!logDoc) return;
   try {
@@ -146,10 +155,12 @@ export const razorpayWebhook = async (req, res) => {
       case "subscription.activated": {
         const meta = extractSubMeta(entity);
         const sub = await updateSub(subscriptionId, { ...meta, status: "active" });
-        if (sub) {
-          await upgradeStorage(sub.userId, sub.planId);
-          console.log(`[webhook] ${subscriptionId} activated → plan ${sub.planId}`);
+        if (!sub) {
+          await flagUnmatchedPayment(logDoc, "subscription.activated", subscriptionId);
+          break;
         }
+        await upgradeStorage(sub.userId, sub.planId);
+        console.log(`[webhook] ${subscriptionId} activated → plan ${sub.planId}`);
         await markLog(logDoc, "processed");
         break;
       }
@@ -166,10 +177,12 @@ export const razorpayWebhook = async (req, res) => {
           ...(invoiceEntity?.id && { invoiceId: invoiceEntity.id }),
           ...(paymentEntity?.method && { paymentMethod: paymentEntity.method }),
         });
-        if (sub) {
-          await upgradeStorage(sub.userId, sub.planId);
-          console.log(`[webhook] ${subscriptionId} charged → plan ${sub.planId}`);
+        if (!sub) {
+          await flagUnmatchedPayment(logDoc, "subscription.charged", subscriptionId);
+          break;
         }
+        await upgradeStorage(sub.userId, sub.planId);
+        console.log(`[webhook] ${subscriptionId} charged → plan ${sub.planId}`);
         await markLog(logDoc, "processed");
         break;
       }

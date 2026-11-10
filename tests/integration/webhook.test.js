@@ -131,6 +131,22 @@ describe("POST /webhooks/razorpay — event processing", () => {
     expect(WebhookEventMock.create).not.toHaveBeenCalled();
   });
 
+  it.each(["subscription.activated", "subscription.charged"])(
+    "%s for a subscription we have no record of is flagged as failed, not silently 'processed'",
+    async (event) => {
+      SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null));
+      await send(body(event)).expect(200);
+      await vi.waitFor(() =>
+        expect(WebhookEventMock.findByIdAndUpdate).toHaveBeenCalledWith(logDoc._id, {
+          status: "failed",
+          error: expect.stringContaining("manual reconciliation"),
+        }),
+      );
+      expect(upgradeStorage).not.toHaveBeenCalled();
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining("sub_1"));
+    },
+  );
+
   it("subscription.activated → marks active and upgrades the user's storage", async () => {
     await send(body("subscription.activated")).expect(200);
     await vi.waitFor(() => logged("processed"));
@@ -140,13 +156,6 @@ describe("POST /webhooks/razorpay — event processing", () => {
     expect(update).toMatchObject({ status: "active", planId: PLAN_ID, paidCount: 1 });
     expect(update.currentEnd).toEqual(new Date(1_702_600_000 * 1000));
     expect(upgradeStorage).toHaveBeenCalledWith(userId, PLAN_ID);
-  });
-
-  it("subscription.activated for an unknown subscription upgrades nobody", async () => {
-    SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null));
-    await send(body("subscription.activated")).expect(200);
-    await vi.waitFor(() => logged("processed"));
-    expect(upgradeStorage).not.toHaveBeenCalled();
   });
 
   it("subscription.charged → stays active, stores payment details and upgrades", async () => {

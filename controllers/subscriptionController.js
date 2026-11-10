@@ -9,6 +9,11 @@ const rzp = new razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+// Razorpay statuses that mean the customer has already authenticated / paid.
+// A local "created" record in one of these states is NOT an abandoned
+// checkout — our webhook just hasn't caught up yet.
+const IN_FLIGHT_RZP_STATUSES = new Set(["authenticated", "active", "pending", "paused"]);
+
 export const createSubscription = async (req, res, next) => {
   try {
     // 1. Validate — reject unknown / tampered plan IDs immediately
@@ -18,15 +23,22 @@ export const createSubscription = async (req, res, next) => {
     }
     const { planId } = result.data;
 
-    // 1. Active subscription?
+    // 1. Already on a paid plan? A cancelled plan stays paid until its
+    //    currentEnd, so it blocks a new checkout too (otherwise the expiry
+    //    cron would later downgrade a user who has since re-subscribed).
     const activeSub = await Subscription.findOne({
       userId: req.user._id,
-      status: { $in: ["active", "pending", "paused"] },
-    }).lean();
+      status: { $in: ["active", "pending", "paused", "cancelled"] },
+    })
+      .sort({ currentEnd: -1 })
+      .lean();
 
     if (activeSub && isPremiumActive(activeSub)) {
       return res.status(409).json({
-        error: "You already have an active subscription.",
+        error:
+          activeSub.status === "cancelled"
+            ? "Your current plan is cancelled but stays active until it ends. You can choose a new plan after that."
+            : "You already have an active subscription.",
       });
     }
 
@@ -34,33 +46,52 @@ export const createSubscription = async (req, res, next) => {
     const createdSub = await Subscription.findOne({
       userId: req.user._id,
       status: "created",
-    }).lean();
+    })
+      .sort({ createdAt: -1 })
+      .lean();
 
     if (createdSub) {
-      let rzpSubscription;
+      let rzpStatus = null;
       try {
-        rzpSubscription = await rzp.subscriptions.fetch(
+        const rzpSubscription = await rzp.subscriptions.fetch(
           createdSub.subscriptionId
         );
+        rzpStatus = rzpSubscription?.status ?? null;
       } catch {
-        // Couldn't fetch from Razorpay.
-        // Remove the stale local record and create a fresh subscription below.
-        await Subscription.deleteOne({
-          _id: createdSub._id,
-        });
-        rzpSubscription = null;
+        // Razorpay no longer knows this subscription — treat it as dead.
       }
 
-      if (rzpSubscription?.status === "created") {
+      // Same plan and still unpaid → let the user resume that checkout.
+      if (rzpStatus === "created" && createdSub.planId === planId) {
         return res.status(200).json({
           subscriptionId: createdSub.subscriptionId,
         });
       }
-      if (rzpSubscription) {
-        await Subscription.deleteOne({
-          _id: createdSub._id,
+
+      // The customer already paid on Razorpay's side and our webhook hasn't
+      // landed yet. Don't delete the record (we'd lose their payment) and
+      // don't start a second subscription.
+      if (IN_FLIGHT_RZP_STATUSES.has(rzpStatus)) {
+        return res.status(409).json({
+          error:
+            "Your payment is still being processed. Please wait a minute and refresh the page.",
         });
       }
+
+      // Abandoned checkout for a different plan (or dead on Razorpay's side):
+      // cancel it there (immediately, best effort) and discard our record, so
+      // the new checkout opens the plan the user actually picked.
+      if (rzpStatus === "created") {
+        try {
+          await rzp.subscriptions.cancel(createdSub.subscriptionId);
+        } catch (err) {
+          console.warn(
+            `[subscriptions] could not cancel abandoned checkout ${createdSub.subscriptionId}:`,
+            err?.error?.description ?? err?.message ?? err
+          );
+        }
+      }
+      await Subscription.deleteOne({ _id: createdSub._id });
     }
 
     // 3. Create in Razorpay
@@ -91,7 +122,9 @@ export const getActiveSubscription = async (req, res, next) => {
     const subscription = await Subscription.findOne({
       userId: req.user._id,
       status: {
-        $in: ["created", "authenticated", "active", "pending", "paused", "cancelled"],
+        // "created" is deliberately absent: an unfinished checkout isn't a
+        // subscription the user should see (or that can be "current").
+        $in: ["authenticated", "active", "pending", "paused", "cancelled"],
       },
     })
       .sort({ createdAt: -1 })

@@ -45,6 +45,18 @@ describe("plan configuration", () => {
     }
   });
 
+  it("grants storage and devices by tier (Pro / Premium), not by billing cycle", () => {
+    const byName = {};
+    for (const [id, d] of Object.entries(PLAN_DETAILS)) (byName[d.name] ??= []).push(PLAN_CONFIG[id]);
+
+    expect(byName.Pro).toHaveLength(2);
+    expect(byName.Premium).toHaveLength(2);
+    expect(byName.Pro[0]).toEqual(byName.Pro[1]);
+    expect(byName.Premium[0]).toEqual(byName.Premium[1]);
+    expect(byName.Pro[0]).toEqual({ storage: 100 * 1024 ** 3, deviceLimit: 3 });
+    expect(byName.Premium[0]).toEqual({ storage: 500 * 1024 ** 3, deviceLimit: 4 });
+  });
+
   it("defines a 500 MB, single-device free plan", () => {
     expect(FREE_PLAN).toEqual({ storage: 0.5 * 1024 ** 3, deviceLimit: 1 });
   });
