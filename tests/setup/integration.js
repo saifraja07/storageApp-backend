@@ -26,6 +26,9 @@ vi.mock("../../models/subscriptionModel.js", async (importOriginal) => ({
 vi.mock("../../models/webhookEventModel.js", async () => ({
   default: (await import("../helpers/modelMocks.js")).WebhookEventMock,
 }));
+vi.mock("../../models/paymentModel.js", async () => ({
+  default: (await import("../helpers/modelMocks.js")).PaymentMock,
+}));
 vi.mock("../../models/otpModel.js", async () => ({
   default: (await import("../helpers/modelMocks.js")).OtpMock,
 }));

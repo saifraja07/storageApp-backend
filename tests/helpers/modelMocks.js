@@ -18,4 +18,5 @@ export const FileMock = createModelMock();
 export const DirectoryMock = createModelMock();
 export const SubscriptionMock = createModelMock();
 export const WebhookEventMock = createModelMock();
+export const PaymentMock = createModelMock();
 export const OtpMock = createModelMock();

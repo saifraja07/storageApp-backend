@@ -5,6 +5,9 @@ import { FREE_PLAN }     from "../config/plans.js";
 
 const EXPIRY_STATUSES = ["authenticated", "pending", "paused", "cancelled", "created"];
 
+// Statuses that still entitle a user to paid storage while currentEnd is ahead.
+const ENTITLING_STATUSES = ["active", "authenticated", "pending", "paused", "cancelled"];
+
 export async function runSubscriptionExpiryJob() {
   const now = new Date();
   console.log(`[cron] subscription expiry job started at ${now.toLocaleString()}`);
@@ -33,9 +36,27 @@ export async function runSubscriptionExpiryJob() {
       }
 
       // Mark expired FIRST to prevent duplicate processing by concurrent runs.
-      await Subscription.findByIdAndUpdate(sub._id, { status: "expired" });
+      // `endedAt` records when access really stopped; `cancelledAt` (if the user
+      // cancelled) is left untouched, so history still says "cancelled".
+      await Subscription.findByIdAndUpdate(sub._id, {
+        status: "expired",
+        endedAt: sub.currentEnd ?? now,
+      });
 
-      if (user.maxStorageInBytes > FREE_PLAN.storage) {
+      // The user may have already bought a NEW plan since this one lapsed (the
+      // cron runs once a day). Never strip storage they have just paid for.
+      const hasNewerPlan = await Subscription.exists({
+        userId: sub.userId,
+        _id: { $ne: sub._id },
+        status: { $in: ENTITLING_STATUSES },
+        currentEnd: { $gt: now },
+      });
+
+      if (hasNewerPlan) {
+        console.log(
+          `[cron] user ${sub.userId} already has a newer paid plan — expired only (sub ${sub.subscriptionId})`
+        );
+      } else if (user.maxStorageInBytes > FREE_PLAN.storage) {
         await downgradeStorage(sub.userId);
         console.log(
           `[cron] downgraded user ${sub.userId} ` +

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { loadApp, loginAs, request } from "../helpers/app.js";
-import { SubscriptionMock } from "../helpers/modelMocks.js";
+import { SubscriptionMock, PaymentMock } from "../helpers/modelMocks.js";
 import { query } from "../helpers/query.js";
 import { hmacHex, oid } from "../helpers/fixtures.js";
 import { upgradeStorage } from "../../services/storageService.js";
@@ -230,6 +230,51 @@ describe("GET /subscriptions/active", () => {
     expect(res.body.subscription.subscriptionId).toBe("sub_1");
   });
 
+  it("describes the state to show: a cancelled-but-paid plan is 'cancelling', not 'cancelled'", async () => {
+    SubscriptionMock.findOne.mockReturnValue(
+      query({ subscriptionId: "sub_1", status: "cancelled", cancelledAt: new Date(), currentEnd: future() }),
+    );
+    const res = await authed("get", "/subscriptions/active").expect(200);
+    expect(res.body.display).toMatchObject({ key: "cancelling", hasAccess: true, renews: false });
+  });
+
+  describe("when there is no current plan", () => {
+    it("says what ended last, so the page can explain it", async () => {
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query(null)) // nothing live
+        .mockReturnValueOnce(
+          query({ subscriptionId: "sub_old", planId: PLAN_ID, status: "expired", cancelledAt: new Date(), endedAt: past() }),
+        );
+      const res = await authed("get", "/subscriptions/active").expect(200);
+      expect(res.body.subscription).toBeNull();
+      expect(res.body.isPremiumActive).toBe(false);
+      expect(res.body.ended).toMatchObject({ subscriptionId: "sub_old", planId: PLAN_ID, reason: "cancelled" });
+    });
+
+    it("distinguishes a plan that lapsed from one the user cancelled", async () => {
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query(null))
+        .mockReturnValueOnce(query({ subscriptionId: "sub_old", planId: PLAN_ID, status: "halted", endedAt: past() }));
+      const res = await authed("get", "/subscriptions/active").expect(200);
+      expect(res.body.ended.reason).toBe("halted");
+    });
+
+    it("only looks at plans the user actually paid for", async () => {
+      SubscriptionMock.findOne.mockReturnValue(query(null));
+      await authed("get", "/subscriptions/active").expect(200);
+      expect(SubscriptionMock.findOne.mock.calls[1][0].paidCount).toEqual({ $gt: 0 });
+    });
+
+    it("treats a cancelled plan whose paid period is over as ended, even before the cron has run", async () => {
+      SubscriptionMock.findOne
+        .mockReturnValueOnce(query({ subscriptionId: "sub_1", planId: PLAN_ID, status: "cancelled", currentEnd: past() }))
+        .mockReturnValueOnce(query({ subscriptionId: "sub_1", planId: PLAN_ID, status: "cancelled", currentEnd: past() }));
+      const res = await authed("get", "/subscriptions/active").expect(200);
+      expect(res.body.subscription).toBeNull();
+      expect(res.body.ended).toMatchObject({ subscriptionId: "sub_1", reason: "cancelled" });
+    });
+  });
+
   it("reports no premium once the period has ended", async () => {
     SubscriptionMock.findOne.mockReturnValue(
       query({ subscriptionId: "sub_1", status: "active", currentEnd: past() }),
@@ -317,7 +362,7 @@ describe("POST /subscriptions/:subscriptionId/cancel", () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "created" }));
     rzp.subscriptions.cancel.mockResolvedValue({});
     const res = await authed("post", "/subscriptions/sub_x/cancel").expect(200);
-    expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", true);
+    expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", false); // nothing paid → no cycle to wait for
     expect(res.body.message).toBe("Subscription cancelled.");
   });
 
@@ -325,12 +370,42 @@ describe("POST /subscriptions/:subscriptionId/cancel", () => {
     SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "active" }));
     rzp.subscriptions.cancel.mockResolvedValue({});
     const res = await authed("post", "/subscriptions/sub_x/cancel").expect(200);
-    expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", false);
+    expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", true); // at the end of the paid cycle
     expect(res.body.message).toMatch(/retain premium access/i);
     expect(SubscriptionMock.updateOne).toHaveBeenCalledWith(
       { subscriptionId: "sub_x", userId: user._id },
-      { status: "cancelled" },
+      { status: "cancelled", cancelledAt: expect.any(Date), cancelAtPeriodEnd: true, lastEventAt: expect.any(Date) },
     );
+  });
+
+  it("an unpaid checkout is cancelled right away, not 'at period end'", async () => {
+    SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "created" }));
+    rzp.subscriptions.cancel.mockResolvedValue({});
+    await authed("post", "/subscriptions/sub_x/cancel").expect(200);
+    expect(SubscriptionMock.updateOne.mock.calls[0][1]).toMatchObject({
+      status: "cancelled",
+      cancelAtPeriodEnd: false,
+    });
+  });
+
+  it.each(["authenticated", "pending"])(
+    "a %s plan has no paid cycle to wait for, so Razorpay cancels it immediately",
+    async (status) => {
+      SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status }));
+      rzp.subscriptions.cancel.mockResolvedValue({});
+      await authed("post", "/subscriptions/sub_x/cancel").expect(200);
+      expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_x", false);
+    },
+  );
+
+  it("syncs instead of failing when it was already cancelled on Razorpay's side", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    SubscriptionMock.findOne.mockReturnValue(query({ subscriptionId: "sub_x", status: "active" }));
+    rzp.subscriptions.cancel.mockRejectedValue(new Error("already cancelled"));
+    rzp.subscriptions.fetch.mockResolvedValue({ status: "cancelled" });
+
+    await authed("post", "/subscriptions/sub_x/cancel").expect(200);
+    expect(SubscriptionMock.updateOne.mock.calls[0][1]).toMatchObject({ status: "cancelled" });
   });
 
   it("does not mark the subscription cancelled locally when Razorpay fails", async () => {
@@ -407,5 +482,63 @@ describe("GET /subscriptions/:subscriptionId/payments", () => {
     rzp.invoices.all.mockResolvedValue({});
     const res = await authed("get", "/subscriptions/sub_x/payments").expect(200);
     expect(res.body.payments).toEqual([]);
+  });
+});
+
+describe("GET /subscriptions/payments (billing history)", () => {
+  const row = (overrides = {}) => ({
+    paymentId: "pay_1",
+    subscriptionId: "sub_1",
+    invoiceId: "inv_1",
+    amountPaise: 16900,
+    refundedPaise: 0,
+    status: "captured",
+    method: "upi",
+    planName: "Pro",
+    cycle: "monthly",
+    paidAt: new Date("2026-10-01T00:00:00Z"),
+    ...overrides,
+  });
+
+  it("lists the user's payments from the ledger (all subscriptions), newest first", async () => {
+    PaymentMock.find.mockReturnValue(query([row(), row({ paymentId: "pay_0", subscriptionId: "sub_0", invoiceId: "inv_0" })]));
+    rzp.invoices.all.mockResolvedValue({ items: [{ id: "inv_1", short_url: "https://rzp.io/i/abc" }] });
+
+    const res = await authed("get", "/subscriptions/payments").expect(200);
+
+    expect(PaymentMock.find).toHaveBeenCalledWith({ userId: user._id });
+    expect(res.body.payments).toHaveLength(2);
+    expect(res.body.payments[0]).toMatchObject({
+      paymentId: "pay_1",
+      amount: 169,
+      refundedAmount: 0,
+      status: "captured",
+      paymentMethod: "upi",
+      planName: "Pro",
+      invoiceUrl: "https://rzp.io/i/abc",
+    });
+    // a payment with no matching invoice link still comes back
+    expect(res.body.payments[1].invoiceUrl).toBeNull();
+  });
+
+  it("still returns the history when Razorpay can't be reached for invoice links", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    PaymentMock.find.mockReturnValue(query([row()]));
+    rzp.invoices.all.mockRejectedValue(new Error("rzp down"));
+
+    const res = await authed("get", "/subscriptions/payments").expect(200);
+    expect(res.body.payments[0]).toMatchObject({ amount: 169, invoiceUrl: null });
+  });
+
+  it("returns an empty list for someone who never paid", async () => {
+    PaymentMock.find.mockReturnValue(query([]));
+    const res = await authed("get", "/subscriptions/payments").expect(200);
+    expect(res.body.payments).toEqual([]);
+    expect(rzp.invoices.all).not.toHaveBeenCalled();
+  });
+
+  it("reports a failure through the error handler", async () => {
+    PaymentMock.find.mockImplementation(() => { throw new Error("db down"); });
+    await authed("get", "/subscriptions/payments").expect(500);
   });
 });

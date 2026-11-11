@@ -1,7 +1,9 @@
 import crypto from "crypto";
 import razorpay from "razorpay";
 import Subscription from "../models/subscriptionModel.js";
+import Payment from "../models/paymentModel.js";
 import { isPremiumActive } from "../utils/isPremiumActive.js";
+import { getSubscriptionDisplay } from "../utils/subscriptionDisplay.js";
 import { createSubscriptionSchema } from "../validators/subscriptionSchema.js";
 
 const rzp = new razorpay({
@@ -119,7 +121,7 @@ export const createSubscription = async (req, res, next) => {
 
 export const getActiveSubscription = async (req, res, next) => {
   try {
-    const subscription = await Subscription.findOne({
+    let subscription = await Subscription.findOne({
       userId: req.user._id,
       status: {
         // "created" is deliberately absent: an unfinished checkout isn't a
@@ -130,13 +132,52 @@ export const getActiveSubscription = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .lean();
 
+    // A cancelled / paused / failing plan whose paid period is over is an ENDED
+    // plan, even if the daily cron has not flipped its status yet.
+    if (
+      subscription &&
+      ["cancelled", "paused", "pending"].includes(subscription.status) &&
+      subscription.currentEnd &&
+      !isPremiumActive(subscription)
+    ) {
+      subscription = null;
+    }
+
     if (!subscription) {
-      return res.json({ subscription: null, isPremiumActive: false });
+      // Tell the client what ended last, so it can say "your Pro plan ended on…"
+      // instead of silently showing the Free plan.
+      const last = await Subscription.findOne({
+        userId: req.user._id,
+        paidCount: { $gt: 0 },
+        $or: [
+          { status: { $in: ["expired", "halted", "completed"] } },
+          { status: { $in: ["cancelled", "paused", "pending"] }, currentEnd: { $lt: new Date() } },
+        ],
+      })
+        .sort({ currentEnd: -1, createdAt: -1 })
+        .lean();
+
+      if (!last) return res.json({ subscription: null, isPremiumActive: false });
+
+      const display = getSubscriptionDisplay({ ...last, status: last.status === "halted" ? "halted" : "expired" });
+      return res.json({
+        subscription: null,
+        isPremiumActive: false,
+        ended: {
+          subscriptionId: last.subscriptionId,
+          planId: last.planId,
+          endedAt: last.endedAt ?? last.currentEnd ?? null,
+          // "cancelled" (the user chose to leave) vs "expired" / "halted" (lapsed)
+          reason: last.cancelledAt || last.status === "cancelled" ? "cancelled" : display.key,
+        },
+      });
     }
 
     return res.json({
       subscription,
       isPremiumActive: isPremiumActive(subscription),
+      // What to SHOW (active / cancelling / past_due…), derived from the raw status.
+      display: getSubscriptionDisplay(subscription),
     });
   } catch (err) {
     next(err);
@@ -209,20 +250,35 @@ export const cancelSubscription = async (req, res, next) => {
     }
 
 
-    if (sub.status === "created") {
-      // Cancel immidiately
-      await rzp.subscriptions.cancel(subscriptionId, true);
-    } else {
-      // Cancel at the end of the current billing cycle.
-      await rzp.subscriptions.cancel(subscriptionId, false);
+    // Razorpay's SDK takes `cancelAtCycleEnd` as the 2nd argument:
+    //  • a paying (active) plan is cancelled at the END of the cycle the customer
+    //    already paid for, so no further charge can ever happen;
+    //  • anything not yet billing (unpaid checkout, authenticated, failed-payment
+    //    retry, paused) has no paid cycle to wait for → cancel right away.
+    const atCycleEnd = sub.status === "active";
+    try {
+      await rzp.subscriptions.cancel(subscriptionId, atCycleEnd);
+    } catch (err) {
+      // Already cancelled / completed on Razorpay's side (e.g. from their
+      // dashboard)? Then our record is simply stale: sync it instead of failing.
+      const remote = await rzp.subscriptions.fetch(subscriptionId).catch(() => null);
+      if (!["cancelled", "completed", "expired"].includes(remote?.status)) throw err;
+      console.warn(`[subscriptions] ${subscriptionId} was already ${remote.status} on Razorpay — syncing`);
     }
 
     // Immediately update local state so the UI reflects the change.
     // The webhook will later reconcile any additional fields.
+    // `cancelAtPeriodEnd` + `cancelledAt` keep the history: the plan stays paid
+    // (and shows as "cancelling") until currentEnd, and still reads "cancelled"
+    // — not just "expired" — afterwards. `lastEventAt` makes any webhook that
+    // was sent BEFORE this click (a delayed "activated", say) count as stale.
     await Subscription.updateOne(
       { subscriptionId, userId: req.user._id },
       {
         status: "cancelled",
+        cancelledAt: new Date(),
+        cancelAtPeriodEnd: sub.status !== "created",
+        lastEventAt: new Date(),
       }
     );
 
@@ -296,6 +352,51 @@ export const getPaymentHistory = async (req, res, next) => {
       status: inv.status,
       createdAt: new Date(inv.created_at * 1000).toISOString(),
       invoiceUrl: inv.short_url ?? null,
+    }));
+
+    return res.json({ payments });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// The customer's full billing history — every payment they have ever made, across
+// all their subscriptions, so it is still there after a plan has ended.
+export const getMyPayments = async (req, res, next) => {
+  try {
+    const rows = await Payment.find({ userId: req.user._id })
+      .sort({ paidAt: -1 })
+      .limit(100)
+      .lean();
+
+    // Invoice download links live on Razorpay. Best effort: if Razorpay is slow
+    // or down the history still loads, just without links.
+    const invoiceUrls = new Map();
+    const subscriptionIds = [...new Set(rows.map((r) => r.subscriptionId))].slice(0, 5);
+    await Promise.all(
+      subscriptionIds.map(async (id) => {
+        try {
+          const invoices = await rzp.invoices.all({ subscription_id: id });
+          for (const inv of invoices.items ?? []) {
+            if (inv.short_url) invoiceUrls.set(inv.id, inv.short_url);
+          }
+        } catch (err) {
+          console.warn(`[subscriptions] invoice links unavailable for ${id}:`, err?.message ?? err);
+        }
+      })
+    );
+
+    const payments = rows.map((p) => ({
+      paymentId: p.paymentId,
+      invoiceId: p.invoiceId,
+      amount: p.amountPaise / 100,
+      refundedAmount: (p.refundedPaise ?? 0) / 100,
+      status: p.status,
+      paymentMethod: p.method,
+      planName: p.planName,
+      cycle: p.cycle,
+      createdAt: p.paidAt,
+      invoiceUrl: (p.invoiceId && invoiceUrls.get(p.invoiceId)) || null,
     }));
 
     return res.json({ payments });
