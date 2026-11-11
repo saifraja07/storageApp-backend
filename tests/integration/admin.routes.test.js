@@ -1,10 +1,23 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { loadApp, request } from "../helpers/app.js";
 import { redisMock } from "../helpers/redisMock.js";
-import { UserMock, FileMock, DirectoryMock, SubscriptionMock } from "../helpers/modelMocks.js";
+import { UserMock, FileMock, DirectoryMock, SubscriptionMock, PaymentMock } from "../helpers/modelMocks.js";
+import { istMonthKey } from "../../services/revenueService.js";
 import { query } from "../helpers/query.js";
 import { makeUser, oid, signedSidCookie } from "../helpers/fixtures.js";
 import { deleteR2Files } from "../../services/cloudflareR2Service.js";
+
+// Razorpay is only reached when a deleted account still has a live subscription.
+const { rzp } = vi.hoisted(() => ({
+  rzp: { subscriptions: { cancel: vi.fn(), fetch: vi.fn() } },
+}));
+vi.mock("razorpay", () => ({
+  default: class {
+    constructor() {
+      return rzp;
+    }
+  },
+}));
 
 // The Cloudflare usage snapshot is fetched over the network; the controller's
 // own behaviour (auth, caching headers, force flag) is what these tests cover.
@@ -188,6 +201,7 @@ describe("DELETE /admin/users/:userId", () => {
     const { cookie } = actAs("SuperAdmin", t);
     const fileId = oid();
     FileMock.find.mockReturnValue(query([{ _id: fileId, extension: ".pdf" }]));
+    SubscriptionMock.find.mockReturnValue(query([]));
     redisMock.ft.search.mockResolvedValue({ total: 1, documents: [{ id: "session:x" }] });
 
     await request(app).delete(`/admin/users/${t._id}`).set("Cookie", cookie).expect(200);
@@ -197,6 +211,54 @@ describe("DELETE /admin/users/:userId", () => {
     expect(DirectoryMock.deleteMany).toHaveBeenCalled();
     expect(t.deleteOne).toHaveBeenCalledTimes(1);
     expect(redisMock.del).toHaveBeenCalledWith("session:x");
+  });
+
+  describe("a user with a live subscription", () => {
+    const withLiveSub = () => {
+      const t = target("User");
+      const { cookie } = actAs("SuperAdmin", t);
+      const subDoc = { _id: oid(), subscriptionId: "sub_live" };
+      FileMock.find.mockReturnValue(query([]));
+      SubscriptionMock.find.mockReturnValue(query([subDoc]));
+      return { t, cookie, subDoc };
+    };
+
+    it("stops the billing on Razorpay BEFORE deleting the account", async () => {
+      const { t, cookie, subDoc } = withLiveSub();
+      rzp.subscriptions.cancel.mockResolvedValue({});
+
+      await request(app).delete(`/admin/users/${t._id}`).set("Cookie", cookie).expect(200);
+
+      expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_live"); // immediate, no cycle to honour
+      expect(SubscriptionMock.updateMany).toHaveBeenCalledWith(
+        { _id: { $in: [subDoc._id] } },
+        expect.objectContaining({ status: "expired", cancelledAt: expect.any(Date), endedAt: expect.any(Date) }),
+      );
+      expect(t.deleteOne).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the account (nothing deleted) if Razorpay refuses to cancel", async () => {
+      const { t, cookie } = withLiveSub();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      rzp.subscriptions.cancel.mockRejectedValue(new Error("rzp down"));
+      rzp.subscriptions.fetch.mockResolvedValue({ status: "active" });
+
+      const res = await request(app).delete(`/admin/users/${t._id}`).set("Cookie", cookie).expect(502);
+
+      expect(res.body.error).toMatch(/NOT deleted/);
+      expect(t.deleteOne).not.toHaveBeenCalled();
+      expect(FileMock.deleteMany).not.toHaveBeenCalled();
+      expect(deleteR2Files).not.toHaveBeenCalled();
+    });
+
+    it("carries on when the subscription was already cancelled on Razorpay's side", async () => {
+      const { t, cookie } = withLiveSub();
+      rzp.subscriptions.cancel.mockRejectedValue(new Error("already cancelled"));
+      rzp.subscriptions.fetch.mockResolvedValue({ status: "cancelled" });
+
+      await request(app).delete(`/admin/users/${t._id}`).set("Cookie", cookie).expect(200);
+      expect(t.deleteOne).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("refuses to delete yourself", async () => {
@@ -248,77 +310,176 @@ describe("PATCH /admin/users/:userId/role", () => {
 });
 
 describe("GET /admin/dashboard/plans", () => {
-  it("summarises plans, revenue, storage alerts and recent subscriptions for managers", async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const thisMonth = () => istMonthKey(new Date());
+
+  // Wires every query the dashboard makes.
+  function stubDashboard({ owner, sub, payments = [], ledgerRows = [], recentSubs, alerts }) {
+    UserMock.countDocuments.mockResolvedValue(7);
+    SubscriptionMock.aggregate.mockResolvedValue(sub ? [sub] : []);
+    SubscriptionMock.find.mockReturnValue(
+      query(
+        recentSubs ??
+          (sub ? [{ ...sub, userId: { name: owner.name, email: owner.email, picture: owner.picture } }] : []),
+      ),
+    );
+    UserMock.aggregate.mockResolvedValue(alerts ?? []);
+    UserMock.find.mockReturnValue(query(owner ? [owner] : []));
+    PaymentMock.aggregate.mockResolvedValue(ledgerRows);
+    PaymentMock.find.mockReturnValue(query(payments));
+  }
+
+  it("summarises users, recurring + received revenue, storage alerts and recent activity", async () => {
     const { cookie } = actAs("Manager");
-    const owner = makeUser({
-      name: "Pat",
-      email: "pat@example.com",
-      maxStorageInBytes: 1000,
-      usedStorageInBytes: 900,
-    });
+    const owner = makeUser({ name: "Pat", email: "pat@example.com", maxStorageInBytes: 1000, usedStorageInBytes: 900 });
     const sub = {
       _id: oid(),
       userId: owner._id,
-      planId: "plan_T7QOKw1SWn3YA9", // Pro, monthly
+      planId: "plan_T7QOKw1SWn3YA9", // Pro, monthly (₹169)
       status: "active",
-      currentEnd: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
+      currentEnd: new Date(Date.now() + 10 * DAY),
       createdAt: new Date(),
     };
-    UserMock.countDocuments.mockResolvedValue(7);
-    SubscriptionMock.aggregate.mockResolvedValue([sub]);
-    SubscriptionMock.find.mockReturnValue(
-      query([{ ...sub, userId: { name: owner.name, email: owner.email, picture: owner.picture } }]),
-    );
-    UserMock.find.mockReturnValueOnce(query([owner])).mockReturnValueOnce(query([owner]));
+    stubDashboard({
+      owner,
+      sub,
+      alerts: [{ ...owner, percentUsed: 90 }],
+      ledgerRows: [{ _id: thisMonth(), grossPaise: 16900, refundedPaise: 0, payments: 1 }],
+      payments: [
+        {
+          _id: oid(), paymentId: "pay_1", userId: { name: "Pat", email: "pat@example.com" },
+          planId: sub.planId, planName: "Pro", cycle: "monthly",
+          amountPaise: 16900, refundedPaise: 0, status: "captured", method: "upi", paidAt: new Date(),
+        },
+      ],
+    });
 
     const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
 
     expect(res.body.summary).toEqual({
       totalUsers: 7,
       premiumUsers: 1,
-      monthlyRevenue: 169,
-      yearlyRevenue: 0,
+      payingSubscribers: 1,
+      cancellingUsers: 0,
+      pastDueUsers: 0,
+      expiringSoon: 0,
+      lifetimeRevenue: 169,
+      revenueThisMonth: 169,
+      revenueLastMonth: 0,
+      revenueThisYear: 169,
+      refundedTotal: 0,
+      totalPayments: 1,
+      mrr: 169,
     });
     expect(res.body.activePlans).toHaveLength(1);
     expect(res.body.activePlans[0]).toMatchObject({
-      name: "Pat",
-      planName: "Pro",
-      cycle: "Monthly",
-      status: "active",
+      name: "Pat", planName: "Pro", cycle: "Monthly", status: "active",
+      displayStatus: "active", displayLabel: "Active", renews: true,
     });
     expect(res.body.storageAlerts[0]).toMatchObject({ email: "pat@example.com", percentUsed: 90 });
-    expect(res.body.recentSubscriptions[0]).toMatchObject({ name: "Pat", planName: "Pro" });
+    expect(res.body.recentSubscriptions[0]).toMatchObject({ name: "Pat", planName: "Pro", displayStatus: "active" });
+  });
+
+  it("a CANCELLED subscription keeps its payment in revenue and shows as 'cancelling' until it ends", async () => {
+    const { cookie } = actAs("Manager");
+    const owner = makeUser({ name: "Sam" });
+    const sub = {
+      _id: oid(),
+      userId: owner._id,
+      planId: "plan_T7QPutFKX9ueS5", // Pro, yearly (₹1599)
+      status: "cancelled",
+      cancelledAt: new Date(),
+      currentEnd: new Date(Date.now() + 200 * DAY),
+      createdAt: new Date(),
+    };
+    stubDashboard({
+      owner,
+      sub,
+      ledgerRows: [{ _id: thisMonth(), grossPaise: 159900, refundedPaise: 0, payments: 1 }],
+    });
+
+    const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
+
+    // the money was received → still counted…
+    expect(res.body.summary.lifetimeRevenue).toBe(1599);
+    expect(res.body.summary.revenueThisMonth).toBe(1599);
+    // …they keep paid access, but are not part of recurring revenue (they won't renew)
+    expect(res.body.summary).toMatchObject({ premiumUsers: 1, cancellingUsers: 1, payingSubscribers: 0, mrr: 0, expiringSoon: 0 });
+    expect(res.body.activePlans[0]).toMatchObject({ displayStatus: "cancelling", renews: false });
+  });
+
+  it("an ENDED subscription no longer lists as a plan, but its payments still count", async () => {
+    const { cookie } = actAs("Manager");
+    // the latest-subscription query only returns live statuses, so an expired one is absent
+    stubDashboard({
+      ledgerRows: [
+        { _id: "2026-01", grossPaise: 49900, refundedPaise: 0, payments: 1 },
+        { _id: "2026-02", grossPaise: 49900, refundedPaise: 49900, payments: 1 },
+      ],
+    });
+    const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
+    expect(res.body.activePlans).toEqual([]);
+    expect(res.body.summary).toMatchObject({
+      premiumUsers: 0,
+      lifetimeRevenue: 499, // 998 collected − 499 refunded
+      refundedTotal: 499,
+      totalPayments: 2,
+    });
+  });
+
+  it("counts plans ending within a week", async () => {
+    const { cookie } = actAs("Manager");
+    const owner = makeUser({ name: "Lee" });
+    const sub = {
+      _id: oid(), userId: owner._id, planId: "plan_T7QOKw1SWn3YA9", status: "cancelled",
+      cancelledAt: new Date(), currentEnd: new Date(Date.now() + 3 * DAY), createdAt: new Date(),
+    };
+    stubDashboard({ owner, sub });
+    const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
+    expect(res.body.summary).toMatchObject({ expiringSoon: 1, cancellingUsers: 1, pastDueUsers: 0 });
+  });
+
+  it("counts failing payments, but not as 'ending' while there is time to recover", async () => {
+    const { cookie } = actAs("Manager");
+    const owner = makeUser({ name: "Lee" });
+    const sub = {
+      _id: oid(), userId: owner._id, planId: "plan_T7QOKw1SWn3YA9", status: "pending",
+      currentEnd: new Date(Date.now() + 20 * DAY), createdAt: new Date(),
+    };
+    stubDashboard({ owner, sub });
+    const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
+    expect(res.body.summary).toMatchObject({ pastDueUsers: 1, expiringSoon: 0 });
+  });
+
+  it("hides unfinished checkouts and never-paid cancellations from recent activity", async () => {
+    const { cookie } = actAs("Manager");
+    stubDashboard({});
+    await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
+    const filter = SubscriptionMock.find.mock.calls[0][0];
+    expect(filter.status).toEqual({ $ne: "created" });
+    expect(filter.$nor).toEqual([{ status: "cancelled", paidCount: 0 }]);
   });
 
   it("ignores subscriptions that belong to disabled users", async () => {
     const { cookie } = actAs("Manager");
     const owner = makeUser({ isDeleted: true });
     const sub = {
-      _id: oid(),
-      userId: owner._id,
-      planId: "plan_T7QOKw1SWn3YA9",
-      status: "active",
-      currentEnd: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
-      createdAt: new Date(),
+      _id: oid(), userId: owner._id, planId: "plan_T7QOKw1SWn3YA9", status: "active",
+      currentEnd: new Date(Date.now() + 10 * DAY), createdAt: new Date(),
     };
-    UserMock.countDocuments.mockResolvedValue(1);
-    SubscriptionMock.aggregate.mockResolvedValue([sub]);
-    SubscriptionMock.find.mockReturnValue(query([]));
-    UserMock.find.mockReturnValueOnce(query([owner])).mockReturnValueOnce(query([owner]));
+    stubDashboard({ owner, sub, recentSubs: [] });
 
     const res = await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(200);
 
-    expect(res.body.summary).toMatchObject({ premiumUsers: 0, monthlyRevenue: 0, yearlyRevenue: 0 });
+    expect(res.body.summary).toMatchObject({ premiumUsers: 0, payingSubscribers: 0, mrr: 0 });
     expect(res.body.activePlans).toEqual([]);
   });
 
   it("passes database failures to the error handler", async () => {
     const { cookie } = actAs("Manager");
     vi.spyOn(console, "error").mockImplementation(() => {});
+    stubDashboard({});
     UserMock.countDocuments.mockRejectedValue(new Error("db down"));
-    SubscriptionMock.aggregate.mockResolvedValue([]);
-    SubscriptionMock.find.mockReturnValue(query([]));
-    UserMock.find.mockReturnValue(query([]));
     await request(app).get("/admin/dashboard/plans").set("Cookie", cookie).expect(500);
   });
 });

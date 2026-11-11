@@ -7,6 +7,7 @@ import { getTargetUser } from "../utils/getTargetUser.js";
 import { canAssignRole } from "../utils/permissions.js";
 import { roleSchema, userStatusSchema } from "../validators/authSchema.js";
 import { deleteUserSessions } from "../utils/sessionUtils.js";
+import { cancelUserSubscriptions } from "../services/subscriptionCleanup.js";
 
 export const getAllUsers = async (req, res) => {
     const allUsers = await User.find()
@@ -118,6 +119,17 @@ export const permanentlyDeleteUser = async (req, res) => {
     const target = await getTargetUser(req, res);
 
     if (!target) return;
+
+    // Never delete an account that is still being billed: stop its subscriptions
+    // first, and keep the account if that can't be done.
+    try {
+        await cancelUserSubscriptions(target._id);
+    } catch (err) {
+        console.error(`[admin] could not cancel subscriptions of ${userId} before deletion:`, err);
+        return res.status(502).json({
+            error: "Couldn't cancel this user's subscription with Razorpay, so the account was NOT deleted. Try again, or cancel it from the Razorpay dashboard first.",
+        });
+    }
 
     const allFiles = await File.find({ userId })
         .select("_id extension")

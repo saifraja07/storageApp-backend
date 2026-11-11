@@ -5,6 +5,7 @@ import {
   cancelSubscription,
   getUpdatePaymentLink,
   getPaymentHistory,
+  getMyPayments,
   verifySubscription,
 } from "../controllers/subscriptionController.js";
 import { rateLimiter } from "../middleWares/limiterMiddleware.js";
@@ -15,6 +16,9 @@ const router = express.Router();
 // These must come before any /:param routes so Express doesn't swallow them.
 
 router.get("/active", getActiveSubscription);
+
+// The customer's whole billing history (all subscriptions, from our payment ledger)
+router.get("/payments", rateLimiter(15 * 60 * 1000, 20), getMyPayments);
 
 // Verify Razorpay signature after checkout — does NOT activate premium
 router.post(

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { loadApp, request } from "../helpers/app.js";
-import { SubscriptionMock, WebhookEventMock } from "../helpers/modelMocks.js";
+import { SubscriptionMock, WebhookEventMock, PaymentMock } from "../helpers/modelMocks.js";
 import { query } from "../helpers/query.js";
 import { hmacHex, oid } from "../helpers/fixtures.js";
 import { upgradeStorage, downgradeStorage } from "../../services/storageService.js";
@@ -152,7 +152,7 @@ describe("POST /webhooks/razorpay — event processing", () => {
     await vi.waitFor(() => logged("processed"));
 
     const [filter, update] = SubscriptionMock.findOneAndUpdate.mock.calls[0];
-    expect(filter).toEqual({ subscriptionId: "sub_1" });
+    expect(filter.subscriptionId).toBe("sub_1");
     expect(update).toMatchObject({ status: "active", planId: PLAN_ID, paidCount: 1 });
     expect(update.currentEnd).toEqual(new Date(1_702_600_000 * 1000));
     expect(upgradeStorage).toHaveBeenCalledWith(userId, PLAN_ID);
@@ -247,12 +247,228 @@ describe("POST /webhooks/razorpay — event processing", () => {
     expect(SubscriptionMock.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
-  it("a processing failure is recorded on the log but still acknowledged", async () => {
+  it("a processing failure is recorded on the log and answered with 500 so Razorpay retries", async () => {
     SubscriptionMock.findOneAndUpdate.mockImplementation(() => {
       throw new Error("db write failed");
     });
-    await send(body("subscription.activated")).expect(200);
-    await vi.waitFor(() => logged("failed", "db write failed"));
+    await send(body("subscription.activated")).expect(500);
+    logged("failed", "db write failed");
     expect(upgradeStorage).not.toHaveBeenCalled();
+  });
+
+  it("re-processes a retried delivery whose earlier attempt FAILED (instead of ignoring it forever)", async () => {
+    WebhookEventMock.create.mockRejectedValue(Object.assign(new Error("dup"), { code: 11000 }));
+    WebhookEventMock.findOneAndUpdate.mockResolvedValue(logDoc);
+
+    await send(body("subscription.activated")).expect(200);
+
+    const [filter, update] = WebhookEventMock.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({
+      webhookKey: `subscription.activated:sub_1:${CREATED_AT}`,
+      status: "failed",
+    });
+    expect(update).toEqual({ status: "received", error: null });
+    expect(upgradeStorage).toHaveBeenCalledWith(userId, PLAN_ID);
+    logged("processed");
+  });
+});
+
+describe("POST /webhooks/razorpay — out-of-order delivery", () => {
+  const EVENT_AT = new Date(CREATED_AT * 1000);
+
+  it("only applies an event that is not older than the newest one already applied", async () => {
+    await send(body("subscription.cancelled")).expect(200);
+    const [filter, update] = SubscriptionMock.findOneAndUpdate.mock.calls[0];
+    expect(filter.$or).toEqual([{ lastEventAt: null }, { lastEventAt: { $lte: EVENT_AT } }]);
+    expect(update.lastEventAt).toEqual(EVENT_AT);
+  });
+
+  it("a STALE 'activated' (arriving after a newer event) does not re-open the plan or touch storage", async () => {
+    SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null)); // blocked by the guard…
+    SubscriptionMock.exists.mockResolvedValue({ _id: oid() }); //      …but the subscription exists
+    SubscriptionMock.findOne.mockReturnValue(query({ userId, planId: PLAN_ID, status: "cancelled" }));
+
+    await send(body("subscription.activated")).expect(200);
+
+    expect(upgradeStorage).not.toHaveBeenCalled();
+    logged("processed"); // not flagged as an unknown subscription
+  });
+
+  it("…yet the payment in a stale event is still recorded (the money arrived)", async () => {
+    SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null));
+    SubscriptionMock.exists.mockResolvedValue({ _id: oid() });
+    SubscriptionMock.findOne.mockReturnValue(query({ userId, planId: PLAN_ID, status: "cancelled" }));
+
+    await send(
+      body("subscription.charged", {}, { payment: { entity: { id: "pay_late", amount: 16900, status: "captured" } } }),
+    ).expect(200);
+
+    expect(upgradeStorage).not.toHaveBeenCalled();
+    expect(PaymentMock.findOneAndUpdate.mock.calls[0][0]).toEqual({ paymentId: "pay_late" });
+  });
+
+  it("a stale 'cancelled' does not stamp a cancellation date", async () => {
+    SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null));
+    SubscriptionMock.exists.mockResolvedValue({ _id: oid() });
+    SubscriptionMock.findOne.mockReturnValue(query({ userId, planId: PLAN_ID, status: "active" }));
+
+    await send(body("subscription.cancelled")).expect(200);
+    expect(SubscriptionMock.updateOne).not.toHaveBeenCalled();
+  });
+
+  it("a stale 'halted' does not downgrade a user who has since paid", async () => {
+    SubscriptionMock.findOneAndUpdate.mockReturnValue(query(null));
+    SubscriptionMock.exists.mockResolvedValue({ _id: oid() });
+    SubscriptionMock.findOne.mockReturnValue(query({ userId, planId: PLAN_ID, status: "active" }));
+
+    await send(body("subscription.halted")).expect(200);
+    expect(downgradeStorage).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /webhooks/razorpay — payment ledger (revenue)", () => {
+  const chargedPayload = (paymentOverrides = {}) =>
+    body(
+      "subscription.charged",
+      {},
+      {
+        payment: {
+          entity: {
+            id: "pay_9",
+            amount: 16900,
+            currency: "INR",
+            status: "captured",
+            method: "upi",
+            fee: 400,
+            tax: 61,
+            created_at: 1_700_000_050,
+            ...paymentOverrides,
+          },
+        },
+        invoice: { entity: { id: "inv_9" } },
+      },
+    );
+
+  it("subscription.charged → records the real amount paid, once per payment id", async () => {
+    await send(chargedPayload()).expect(200);
+
+    const [filter, update, options] = PaymentMock.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ paymentId: "pay_9" });
+    expect(options).toEqual({ upsert: true });
+    expect(update.$setOnInsert).toMatchObject({
+      subscriptionId: "sub_1",
+      userId,
+      planId: PLAN_ID,
+      planName: "Pro",
+      cycle: "monthly",
+      amountPaise: 16900, // what Razorpay really collected, not the catalogue price
+      currency: "INR",
+      status: "captured",
+      refundedPaise: 0,
+      source: "webhook",
+    });
+    expect(update.$setOnInsert.paidAt).toEqual(new Date(1_700_000_050 * 1000));
+    expect(update.$set).toEqual({ method: "upi", feePaise: 400, taxPaise: 61, invoiceId: "inv_9" });
+  });
+
+  it("subscription.activated (the first payment) is recorded too", async () => {
+    await send(
+      body("subscription.activated", {}, { payment: { entity: { id: "pay_first", amount: 16900, status: "captured" } } }),
+    ).expect(200);
+    expect(PaymentMock.findOneAndUpdate.mock.calls[0][0]).toEqual({ paymentId: "pay_first" });
+  });
+
+  it("a replayed event can never reset refund totals (refund fields are insert-only)", async () => {
+    await send(chargedPayload()).expect(200);
+    const update = PaymentMock.findOneAndUpdate.mock.calls[0][1];
+    expect(update.$set).not.toHaveProperty("refundedPaise");
+    expect(update.$set).not.toHaveProperty("status");
+    expect(update.$set).not.toHaveProperty("amountPaise");
+  });
+
+  it("grants premium BEFORE the ledger write, and fails (→ retry) if the ledger write breaks", async () => {
+    PaymentMock.findOneAndUpdate.mockRejectedValue(new Error("ledger down"));
+    await send(chargedPayload()).expect(500);
+    expect(upgradeStorage).toHaveBeenCalledWith(userId, PLAN_ID);
+    logged("failed", "ledger down");
+  });
+
+  it("an event with no payment entity still activates the plan, but is shouted about", async () => {
+    await send(body("subscription.charged")).expect(200);
+    expect(upgradeStorage).toHaveBeenCalledWith(userId, PLAN_ID);
+    expect(PaymentMock.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("backfill"));
+    logged("processed");
+  });
+
+  it("does not count a payment that was not captured", async () => {
+    await send(chargedPayload({ status: "authorized" })).expect(200);
+    expect(PaymentMock.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it("cancelling keeps the payments untouched and only stamps the cancellation", async () => {
+    await send(body("subscription.cancelled")).expect(200);
+    expect(PaymentMock.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(SubscriptionMock.findOneAndUpdate.mock.calls[0][1]).toMatchObject({
+      status: "cancelled",
+      cancelAtPeriodEnd: true,
+    });
+    // stamped only if the cancel click hasn't already recorded it
+    expect(SubscriptionMock.updateOne).toHaveBeenCalledWith(
+      { subscriptionId: "sub_1", cancelledAt: null },
+      { cancelledAt: expect.any(Date) },
+    );
+  });
+});
+
+describe("POST /webhooks/razorpay — refunds", () => {
+  const refund = (event = "refund.processed", overrides = {}) => ({
+    event,
+    created_at: CREATED_AT,
+    payload: {
+      refund: { entity: { id: "rfnd_1", payment_id: "pay_9", amount: 5000, created_at: 1_700_000_100, ...overrides } },
+    },
+  });
+
+  it("refund.processed → subtracts the refund from that payment, once", async () => {
+    PaymentMock.findOneAndUpdate.mockResolvedValue({ paymentId: "pay_9" });
+    await send(refund()).expect(200);
+
+    const [filter, pipeline, options] = PaymentMock.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ paymentId: "pay_9", "refunds.refundId": { $ne: "rfnd_1" } });
+    expect(options).toMatchObject({ updatePipeline: true }); // Mongoose rejects pipeline updates without it
+    expect(Array.isArray(pipeline)).toBe(true);
+    expect(JSON.stringify(pipeline)).toContain("rfnd_1");
+    expect(JSON.stringify(pipeline)).toContain("partially_refunded");
+    logged("processed");
+  });
+
+  it("a refund that was already applied is skipped, not applied twice", async () => {
+    PaymentMock.findOneAndUpdate.mockResolvedValue(null);
+    PaymentMock.exists.mockResolvedValue({ _id: oid() });
+    await send(refund()).expect(200);
+    logged("skipped");
+  });
+
+  it("a refund for a payment we never recorded is flagged for the backfill", async () => {
+    PaymentMock.findOneAndUpdate.mockResolvedValue(null);
+    PaymentMock.exists.mockResolvedValue(null);
+    await send(refund()).expect(200);
+    expect(WebhookEventMock.findByIdAndUpdate).toHaveBeenCalledWith(logDoc._id, {
+      status: "failed",
+      error: expect.stringContaining("backfill"),
+    });
+  });
+
+  it("refund.created (not yet processed) does not change revenue", async () => {
+    await send(refund("refund.created")).expect(200);
+    expect(PaymentMock.findOneAndUpdate).not.toHaveBeenCalled();
+    logged("skipped");
+  });
+
+  it("a refund delivery is idempotent like every other event", async () => {
+    WebhookEventMock.create.mockRejectedValue(Object.assign(new Error("dup"), { code: 11000 }));
+    await send(refund()).expect(200);
+    expect(PaymentMock.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });

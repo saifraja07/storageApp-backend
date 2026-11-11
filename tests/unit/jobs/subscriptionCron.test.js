@@ -58,7 +58,10 @@ describe("runSubscriptionExpiryJob", () => {
 
     await runSubscriptionExpiryJob();
 
-    expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledWith(s._id, { status: "expired" });
+    expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledWith(s._id, {
+      status: "expired",
+      endedAt: s.currentEnd,
+    });
     expect(downgradeStorage).toHaveBeenCalledWith(s.userId);
   });
 
@@ -69,7 +72,10 @@ describe("runSubscriptionExpiryJob", () => {
 
     await runSubscriptionExpiryJob();
 
-    expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledWith(s._id, { status: "expired" });
+    expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledWith(s._id, {
+      status: "expired",
+      endedAt: s.currentEnd,
+    });
     expect(downgradeStorage).not.toHaveBeenCalled();
   });
 
@@ -94,5 +100,37 @@ describe("runSubscriptionExpiryJob", () => {
 
     expect(downgradeStorage).toHaveBeenCalledTimes(2);
     expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the cancellation history: it never touches cancelledAt when expiring", async () => {
+    const s = sub({ cancelledAt: new Date("2019-12-01") });
+    SubscriptionMock.find.mockReturnValue(query([s]));
+    UserMock.findById.mockReturnValue(query({ maxStorageInBytes: FREE_PLAN.storage * 200 }));
+
+    await runSubscriptionExpiryJob();
+
+    const update = SubscriptionMock.findByIdAndUpdate.mock.calls[0][1];
+    expect(update).not.toHaveProperty("cancelledAt");
+    expect(update.endedAt).toEqual(s.currentEnd);
+  });
+
+  it("does NOT downgrade a user who has already bought a newer paid plan", async () => {
+    const s = sub();
+    SubscriptionMock.find.mockReturnValue(query([s]));
+    UserMock.findById.mockReturnValue(query({ maxStorageInBytes: FREE_PLAN.storage * 200 }));
+    SubscriptionMock.exists.mockResolvedValue({ _id: oid() });
+
+    await runSubscriptionExpiryJob();
+
+    // the old one is still marked expired…
+    expect(SubscriptionMock.findByIdAndUpdate).toHaveBeenCalledWith(s._id, expect.objectContaining({ status: "expired" }));
+    // …but the storage they just paid for is left alone
+    expect(downgradeStorage).not.toHaveBeenCalled();
+
+    const filter = SubscriptionMock.exists.mock.calls[0][0];
+    expect(filter.userId).toBe(s.userId);
+    expect(filter._id).toEqual({ $ne: s._id });
+    expect(filter.currentEnd.$gt).toBeInstanceOf(Date);
+    expect(filter.status.$in).not.toContain("expired");
   });
 });
