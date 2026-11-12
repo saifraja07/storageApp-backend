@@ -1,3 +1,4 @@
+import bcrypt from "bcrypt";
 import mongoose, { Types } from "mongoose";
 import OTP from "../models/otpModel.js"
 import User from "../models/userModel.js";
@@ -11,6 +12,29 @@ import { isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 
 const tracer = trace.getTracer("storageApp-auth");
+
+const MAX_OTP_ATTEMPTS = 5;
+
+// Valid bcrypt hash (cost 12) of a throwaway string. Compared against when the
+// email is unknown so "no such user" takes as long as "wrong password".
+const DUMMY_PASSWORD_HASH = "$2b$12$RYWsiRMDdUAzh5E1boFpSeeNV9doPXgM6Ed7n8/l.olJX.pRWfBRK";
+
+// Counts a wrong OTP guess for this email and invalidates the code after
+// MAX_OTP_ATTEMPTS, so a 4-digit code can't be brute-forced. Never throws.
+async function recordFailedOtpAttempt(email) {
+    try {
+        const record = await OTP.findOneAndUpdate(
+            { email },
+            { $inc: { attempts: 1 } },
+            { returnDocument: "after" },
+        );
+        if (record && record.attempts >= MAX_OTP_ATTEMPTS) {
+            await OTP.deleteOne({ email });
+        }
+    } catch (err) {
+        console.error("Could not record failed OTP attempt", err);
+    }
+}
 
 
 export const sendOtp = async (req, res) => {
@@ -43,6 +67,7 @@ export const verifyOtp = async (req, res) => {
     
     const result = await OTP.findOne({ email, otp })
     if (!result) {
+        await recordFailedOtpAttempt(email);
         return res.status(400).json({ error: "Invalid or Expired Otp!" })
     }
     return res.json({ message: "Otp verified" })
@@ -131,6 +156,7 @@ export const register = async (req, res, next) => {
 
     const otpRecord = await OTP.findOneAndDelete({ email, otp })
     if (!otpRecord) {
+        await recordFailedOtpAttempt(email);
         return res.status(400).json({ error: "Invalid or Expired Otp!" })
     }
 
@@ -192,6 +218,9 @@ export const login = async (req, res) => {
     const user = await User.findOne({ email });
 
     if (!user) {
+        // Burn the same bcrypt time as a real check so response timing
+        // doesn't reveal which emails are registered.
+        await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
         return res.status(404).json({
             error: "Invalid email or password!",
         });

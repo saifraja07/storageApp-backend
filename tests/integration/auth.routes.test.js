@@ -279,3 +279,55 @@ describe("logout", () => {
     expect(redisMock.del).toHaveBeenCalledWith("session:a", "session:b");
   });
 });
+
+
+describe("OTP brute-force protection", () => {
+  it("counts a wrong guess on /auth/otp/verify", async () => {
+    OtpMock.findOne.mockResolvedValue(null);
+    OtpMock.findOneAndUpdate.mockResolvedValue({ attempts: 1 });
+
+    await request(app).post("/auth/otp/verify").send({ email: "a@b.co", otp: "0000" }).expect(400);
+
+    expect(OtpMock.findOneAndUpdate).toHaveBeenCalledWith(
+      { email: "a@b.co" },
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
+    expect(OtpMock.deleteOne).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the code after 5 wrong guesses", async () => {
+    OtpMock.findOne.mockResolvedValue(null);
+    OtpMock.findOneAndUpdate.mockResolvedValue({ attempts: 5 });
+
+    await request(app).post("/auth/otp/verify").send({ email: "a@b.co", otp: "0000" }).expect(400);
+
+    expect(OtpMock.deleteOne).toHaveBeenCalledWith({ email: "a@b.co" });
+  });
+
+  it("counts a wrong guess on /auth/register too", async () => {
+    OtpMock.findOneAndDelete.mockResolvedValue(null);
+    OtpMock.findOneAndUpdate.mockResolvedValue({ attempts: 2 });
+
+    await request(app)
+      .post("/auth/register")
+      .send({ name: "Haadi", email: "new@example.com", password: "secret", otp: "0000" })
+      .expect(400);
+
+    expect(OtpMock.findOneAndUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("still answers 400 if recording the failed attempt errors", async () => {
+    OtpMock.findOne.mockResolvedValue(null);
+    OtpMock.findOneAndUpdate.mockRejectedValue(new Error("db down"));
+
+    const res = await request(app).post("/auth/otp/verify").send({ email: "a@b.co", otp: "0000" }).expect(400);
+    expect(res.body.error).toBe("Invalid or Expired Otp!");
+  });
+
+  it("does not count anything when the code is correct", async () => {
+    OtpMock.findOne.mockResolvedValue({ email: "a@b.co", otp: 1234 });
+    await request(app).post("/auth/otp/verify").send({ email: "a@b.co", otp: "1234" }).expect(200);
+    expect(OtpMock.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+});
