@@ -1,5 +1,6 @@
 import File from "../models/fileModel.js";
 import Directory from "../models/directoryModel.js";
+import User from "../models/userModel.js";
 import { updateDirectorySize } from "../services/storageAccountingService.js";
 import { deleteR2Files } from "../services/cloudflareR2Service.js";
 import { createDirectorySchema, renameDirectorySchema } from "../validators/directorySchema.js";
@@ -137,6 +138,19 @@ export const deleteDirectory = async (req, res) => {
   await File.deleteMany({
     _id: { $in: files.map(({ _id }) => _id) },
   });
+
+  // Unfinished uploads inside the folder only hold a reservation (they were never
+  // counted in used storage), so release it or it would leak until the account
+  // looks full.
+  const reservedToRelease = files
+    .filter(({ isUploading }) => isUploading)
+    .reduce((sum, { size }) => sum + (size || 0), 0);
+  if (reservedToRelease > 0) {
+    await User.updateOne(
+      { _id: user._id },
+      { $inc: { reservedStorage: -reservedToRelease } }
+    );
+  }
   await Directory.deleteMany({
     _id: { $in: [...directories.map(({ _id }) => _id), directoryData._id] },
   });

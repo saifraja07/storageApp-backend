@@ -75,11 +75,21 @@ export const deleteFile = async (req, res, next) => {
       userId: req.user._id
     })
   ]);
-  await updateDirectorySize(
-    fileData.parentDirId,
-    -fileData.size,
-    req.user.rootDirId
-  );
+
+  if (fileData.isUploading) {
+    // An unfinished upload was only ever *reserved*: it was never added to the
+    // directory or used-storage totals, so release the reservation instead.
+    await User.updateOne(
+      { _id: req.user._id },
+      { $inc: { reservedStorage: -fileData.size } }
+    );
+  } else {
+    await updateDirectorySize(
+      fileData.parentDirId,
+      -fileData.size,
+      req.user.rootDirId
+    );
+  }
   return res.status(200).json({ message: "File Deleted Successfully" });
 };
 
@@ -195,33 +205,50 @@ export const uploadComplete = async (req, res) => {
     });
   }
 
+  // Removes a failed upload and releases its reservation. The atomic delete
+  // (only while still uploading) guarantees that concurrent/duplicate calls
+  // release the reservation at most once.
+  const discardUpload = async () => {
+    const removed = await File.findOneAndDelete({
+      _id: fileId,
+      userId: req.user._id,
+      isUploading: true,
+    });
+    if (!removed) return;
+
+    await Promise.all([
+      User.updateOne(
+        { _id: req.user._id },
+        { $inc: { reservedStorage: -file.size } }
+      ),
+      deleteR2File({
+        key: `${fileId}${file.extension}`,
+        userId: req.user._id,
+      }),
+    ]);
+  };
+
+  let claimed = false;
   try {
     const fileMetaData = await getR2FileMetaData({ key: `${fileId}${file.extension}`, userId: req.user._id })
 
     if (file.size !== fileMetaData.ContentLength) {
-      await Promise.all([
-        file.deleteOne(),
-
-        User.updateOne(
-          { _id: req.user._id },
-          {
-            $inc: {
-              reservedStorage: -file.size,
-            },
-          }
-        ),
-
-        deleteR2File({
-          key: `${fileId}${file.extension}`,
-          userId: req.user._id,
-        }),
-      ]);
+      await discardUpload();
       return res.status(400).json({ error: "File size does not match!" })
     };
-    file.isUploading = false;
-    await Promise.all([
-      file.save(),
 
+    // Atomically flip isUploading -> false. Only one concurrent request can win,
+    // so the storage accounting below runs exactly once per upload.
+    const won = await File.findOneAndUpdate(
+      { _id: fileId, userId: req.user._id, isUploading: true },
+      { $set: { isUploading: false } }
+    );
+    if (!won) {
+      return res.status(400).json({ error: "Upload already completed" });
+    }
+    claimed = true;
+
+    await Promise.all([
       User.updateOne(
         { _id: req.user._id },
         {
@@ -239,24 +266,16 @@ export const uploadComplete = async (req, res) => {
     ]);
     return res.json({ message: "Upload completed" });
   } catch (err) {
+    if (claimed) {
+      // The file is already marked complete; discarding it now would risk
+      // double-releasing the reservation. Surface the error for reconciliation.
+      console.error("uploadComplete accounting failed after finalising", fileId, err);
+      return res.status(500).json({ error: "Upload finalised but storage accounting failed" });
+    }
 
-    await Promise.all([
-      file.deleteOne(),
-
-      User.updateOne(
-        { _id: req.user._id },
-        {
-          $inc: {
-            reservedStorage: -file.size,
-          },
-        }
-      ),
-
-      deleteR2File({
-        key: `${fileId}${file.extension}`,
-        userId: req.user._id,
-      }),
-    ]);
+    await discardUpload().catch((cleanupErr) =>
+      console.error("uploadComplete cleanup failed", fileId, cleanupErr)
+    );
     return res.status(400).json({ error: "File could not be uploaded properly" })
   }
 }

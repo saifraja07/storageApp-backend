@@ -27,7 +27,7 @@ export async function getDirectoryContent(rootId) {
 
   const [files, directories] = await Promise.all([
     File.find({ parentDirId: { $in: dirIds } })
-      .select("_id extension")
+      .select("_id extension size isUploading")
       .lean(),
     Directory.find({ _id: { $in: descendantIds } })
       .select("_id")
