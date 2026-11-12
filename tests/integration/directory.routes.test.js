@@ -215,6 +215,28 @@ describe("DELETE /directories/:directoryId", () => {
     );
   });
 
+  it("releases the reservation held by unfinished uploads inside the folder", async () => {
+    const { cookie, user } = loginAs();
+    const dir = { _id: oid(), size: 0, parentDirId: oid() };
+    const files = [
+      { _id: oid(), extension: ".mp4", size: 700, isUploading: true },
+      { _id: oid(), extension: ".mp4", size: 300, isUploading: true },
+      { _id: oid(), extension: ".png", size: 50, isUploading: false },
+    ];
+    DirectoryMock.findOne.mockReturnValue(query(dir));
+    DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [] }]);
+    FileMock.find.mockReturnValue(query(files));
+    DirectoryMock.find.mockReturnValue(query([]));
+    DirectoryMock.findById.mockReturnValue(query({ path: [] }));
+
+    await request(app).delete(`/directories/${dir._id}`).set("Cookie", cookie).expect(200);
+
+    expect(UserMock.updateOne).toHaveBeenCalledWith(
+      { _id: user._id },
+      { $inc: { reservedStorage: -1000 } },
+    );
+  });
+
   it("keeps all records when R2 deletion fails", async () => {
     const { cookie } = loginAs();
     const dir = { _id: oid(), size: 1, parentDirId: oid() };

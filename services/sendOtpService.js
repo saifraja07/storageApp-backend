@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { Resend } from 'resend';
 import OTP from '../models/otpModel.js';
 
@@ -5,12 +6,12 @@ const resend = new Resend(process.env.RESEND_KEY);
 
 export async function sendOtpService(email) {
 
-  const otp = Math.floor(1000 + Math.random() * 9000);
+  const otp = randomInt(1000, 10000); // 4 digits, cryptographically secure
   try {
 
     await OTP.findOneAndUpdate(
       { email },
-      { otp, createdAt: new Date() },
+      { otp, attempts: 0, createdAt: new Date() },
       { upsert: true })
 
 

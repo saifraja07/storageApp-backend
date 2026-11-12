@@ -118,6 +118,26 @@ describe("DELETE /files/:fileId", () => {
   });
 });
 
+describe("DELETE /files/:fileId (unfinished upload)", () => {
+  it("releases the reservation instead of touching directory/used-storage totals", async () => {
+    const { cookie, user } = loginAs();
+    FileMock.findOne.mockReturnValue(query({ extension: ".mp4", size: 2048, parentDirId: oid(), isUploading: true }));
+    deleteR2File.mockResolvedValue({});
+
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
+
+    expect(UserMock.updateOne).toHaveBeenCalledWith(
+      { _id: user._id },
+      { $inc: { reservedStorage: -2048 } },
+    );
+    expect(DirectoryMock.updateMany).not.toHaveBeenCalled();
+    expect(UserMock.updateOne).not.toHaveBeenCalledWith(
+      { rootDirId: user.rootDirId },
+      expect.anything(),
+    );
+  });
+});
+
 describe("POST /files/uploads/initiate", () => {
   const parentId = oid();
   const initiate = (cookie, body) =>
@@ -244,13 +264,17 @@ describe("POST /files/uploads/:uploadId/complete", () => {
     const { cookie, user } = loginAs();
     const file = pendingFile();
     FileMock.findOne.mockResolvedValue(file);
+    FileMock.findOneAndUpdate.mockResolvedValue(file);
     getR2FileMetaData.mockResolvedValue({ ContentLength: 100 });
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
 
     await complete(cookie).expect(200);
 
-    expect(file.isUploading).toBe(false);
-    expect(file.save).toHaveBeenCalledTimes(1);
+    // Atomic claim: only a still-uploading file can be flipped to complete.
+    expect(FileMock.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: VALID_ID, userId: user._id, isUploading: true },
+      { $set: { isUploading: false } },
+    );
     expect(UserMock.updateOne).toHaveBeenCalledWith(
       { _id: user._id },
       { $inc: { reservedStorage: -100 } },
@@ -261,36 +285,87 @@ describe("POST /files/uploads/:uploadId/complete", () => {
     );
   });
 
+  it("does not count the file twice when a concurrent request already finalised it", async () => {
+    const { cookie } = loginAs();
+    FileMock.findOne.mockResolvedValue(pendingFile());
+    FileMock.findOneAndUpdate.mockResolvedValue(null); // lost the race
+    getR2FileMetaData.mockResolvedValue({ ContentLength: 100 });
+
+    const res = await complete(cookie).expect(400);
+
+    expect(res.body.error).toBe("Upload already completed");
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+    expect(DirectoryMock.updateMany).not.toHaveBeenCalled();
+    expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
+  });
+
   it("rejects and cleans up when the uploaded size differs from the reservation", async () => {
     const { cookie, user } = loginAs();
     const file = pendingFile();
     FileMock.findOne.mockResolvedValue(file);
+    FileMock.findOneAndDelete.mockResolvedValue(file);
     getR2FileMetaData.mockResolvedValue({ ContentLength: 999 });
     deleteR2File.mockResolvedValue({});
 
     const res = await complete(cookie).expect(400);
 
     expect(res.body.error).toBe("File size does not match!");
-    expect(file.deleteOne).toHaveBeenCalledTimes(1);
+    expect(FileMock.findOneAndDelete).toHaveBeenCalledWith({
+      _id: VALID_ID,
+      userId: user._id,
+      isUploading: true,
+    });
     expect(deleteR2File).toHaveBeenCalledWith({ key: `${VALID_ID}.txt`, userId: user._id });
     expect(UserMock.updateOne).toHaveBeenCalledWith(
       { _id: user._id },
       { $inc: { reservedStorage: -100 } },
     );
-    expect(file.save).not.toHaveBeenCalled();
+    expect(FileMock.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it("releases the reservation only once when a concurrent request already removed the upload", async () => {
+    const { cookie } = loginAs();
+    FileMock.findOne.mockResolvedValue(pendingFile());
+    FileMock.findOneAndDelete.mockResolvedValue(null); // someone else cleaned it up
+    getR2FileMetaData.mockResolvedValue({ ContentLength: 999 });
+
+    await complete(cookie).expect(400);
+
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+    expect(deleteR2File).not.toHaveBeenCalled();
   });
 
   it("cleans up when the object is missing in R2", async () => {
-    const { cookie } = loginAs();
+    const { cookie, user } = loginAs();
     const file = pendingFile();
     FileMock.findOne.mockResolvedValue(file);
+    FileMock.findOneAndDelete.mockResolvedValue(file);
     getR2FileMetaData.mockRejectedValue(new Error("NotFound"));
     deleteR2File.mockResolvedValue({});
 
     const res = await complete(cookie).expect(400);
 
     expect(res.body.error).toBe("File could not be uploaded properly");
-    expect(file.deleteOne).toHaveBeenCalledTimes(1);
+    expect(FileMock.findOneAndDelete).toHaveBeenCalledTimes(1);
+    expect(UserMock.updateOne).toHaveBeenCalledWith(
+      { _id: user._id },
+      { $inc: { reservedStorage: -100 } },
+    );
+  });
+
+  it("does not discard an already-finalised file if storage accounting fails", async () => {
+    const { cookie } = loginAs();
+    const file = pendingFile();
+    FileMock.findOne.mockResolvedValue(file);
+    FileMock.findOneAndUpdate.mockResolvedValue(file);
+    getR2FileMetaData.mockResolvedValue({ ContentLength: 100 });
+    UserMock.updateOne.mockRejectedValue(new Error("db blip"));
+    DirectoryMock.findById.mockReturnValue(query({ path: [] }));
+
+    await complete(cookie).expect(500);
+
+    expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
+    expect(deleteR2File).not.toHaveBeenCalled();
   });
 });
 
