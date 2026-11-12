@@ -6,7 +6,7 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 
 - **Node.js** (ESM) + **Express 5** — HTTP server and routing
 - **MongoDB** + **Mongoose** — primary data store
-- **Redis** — session storage (via `redis` client, JSON module)
+- **Redis Stack** — session storage (via `redis` client; needs the **RedisJSON** and **RediSearch** modules)
 - **Cloudflare R2** (`@aws-sdk/client-s3`, S3-compatible API) — file storage, with presigned URLs for direct client uploads; a second, dedicated public R2 bucket + Cloudflare CDN domain serves profile images
 - **multer** + **sharp** (+ **heic-convert** for iPhone HEIC/HEIF uploads) — profile picture upload handling and normalization to WebP
 - **Google Auth Library** — Google OAuth login
@@ -24,9 +24,10 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 ├── app.js                       # Entry point: middleware, routes, cron jobs
 ├── config/
 │   ├── db.js                    # MongoDB connection
+│   ├── dbSetup.js               # MongoDB JSON-schema validators
 │   ├── redis.js                 # Redis client
-│   ├── plans.js                 # Subscription plan definitions
-│   └── setup.js                 # MongoDB JSON-schema validators
+│   ├── redisSetup.js            # One-time Redis session index setup
+│   └── plans.js                 # Subscription plan definitions
 ├── controllers/                 # Request handlers
 ├── middleWares/                 # Authentication, validation, security middleware
 ├── models/                      # Mongoose schemas
@@ -139,7 +140,7 @@ A centralized error handler returns a generic 500 JSON response and logs server-
 
 - Node.js (LTS recommended)
 - MongoDB instance
-- Redis instance
+- Redis **Stack** instance (RedisJSON + RediSearch). `npm run setup` creates the `userIdIdx` session search index; a plain Redis without these modules, or a missing index, breaks login (device limit) and logout-all
 - Cloudflare R2 bucket (or other S3-compatible storage)
 - Google OAuth credentials
 - Razorpay account and API keys
@@ -227,13 +228,20 @@ Configure the appropriate environment variables in your deployment environment. 
 
 ### Database Setup
 
-Apply MongoDB JSON-schema validators:
+Run the one-time setup for both MongoDB and Redis (needs Redis Stack):
 
 ```bash
 npm run setup
 ```
 
-Run this once against a fresh database and again after any schema changes in `config/setup.js`.
+This applies the MongoDB JSON-schema validators (`config/dbSetup.js`) and creates the Redis session search index (`config/redisSetup.js`). Run it **before starting the app for the first time**, and again after any schema changes in `config/dbSetup.js`. It is safe to re-run: the Redis step reports "already exists" and changes nothing.
+
+To run only one part:
+
+```bash
+npm run setup:mongo
+npm run setup:redis
+```
 
 ### Development
 
@@ -295,12 +303,6 @@ Unlike normal files, profile pictures are proxied through the API and stored in 
 3. Attach a Cloudflare custom domain to the profile-image bucket only.
 4. Configure `R2_PROFILE_BUCKET_NAME` and `R2_PROFILE_PUBLIC_URL`.
 5. Never enable public access on the private user-files bucket.
-
-## Known Limitations / In Progress
-
-- Verify that all production credentials and payment integrations are configured correctly before launch.
-- Consider adding a global request body size limit for the general JSON body parser.
-- Review rate-limit thresholds under real traffic before launch.
 
 ## Testing
 

@@ -1,8 +1,8 @@
 {
   "name": "storageApp backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Backend API for Haadi Cloud, a secure cloud storage application.",
+  "main": "server.js",
   "type": "module",
   "scripts": {
     "build": "npm install",
@@ -10,7 +10,9 @@
     "local": "node --env-file=.env server.js",
     "start": "node --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
     "dev": "node --watch --env-file=.env --import ./observability/tracing-loader.js --import ./observability/tracing.js server.js",
-    "setup": "node --env-file=.env ./config/setup.js",
+    "setup": "npm run setup:mongo && npm run setup:redis",
+    "setup:mongo": "node --env-file=.env ./config/dbSetup.js",
+    "setup:redis": "node --env-file=.env ./config/redisSetup.js",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
@@ -18,7 +20,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "author": "",
+  "author": "Saif Ali Raja",
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1068.0",
