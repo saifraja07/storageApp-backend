@@ -5,6 +5,7 @@ import Payment from "../models/paymentModel.js";
 import { isPremiumActive } from "../utils/isPremiumActive.js";
 import { getSubscriptionDisplay } from "../utils/subscriptionDisplay.js";
 import { createSubscriptionSchema } from "../validators/subscriptionSchema.js";
+import { PLAN_DETAILS, SUBSCRIPTION_TOTAL_COUNT } from "../config/plans.js";
 
 const rzp = new razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -99,7 +100,7 @@ export const createSubscription = async (req, res, next) => {
     // 3. Create in Razorpay
     const rzpSub = await rzp.subscriptions.create({
       plan_id: planId,
-      total_count: 12,
+      total_count: SUBSCRIPTION_TOTAL_COUNT[PLAN_DETAILS[planId].cycle],
       quantity: 1,
       customer_notify: 1,
       notes: { userId: req.user._id.toString() },

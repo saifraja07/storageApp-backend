@@ -82,18 +82,25 @@ export const getStorage = (userId) => {
     return { client: personalR2Client, bucket: personalBucketName }
 }
 
-export const createUploadSignedUrl = async ({ key, contentType, userId }) => {
+export const createUploadSignedUrl = async ({ key, contentType, size, userId }) => {
     const { client, bucket } = getStorage(userId)
 
+    // Pin the exact byte size. Content-Length becomes part of the signature, so
+    // R2 rejects a PUT whose body is a different size than the one the quota
+    // was reserved for (browsers set Content-Length from the file automatically).
     const command = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
-        ContentType: contentType
+        ContentType: contentType,
+        ...(Number.isInteger(size) ? { ContentLength: size } : {}),
     })
+
+    const signableHeaders = new Set(["content-type"])
+    if (Number.isInteger(size)) signableHeaders.add("content-length")
 
     const url = await getSignedUrl(client, command, {
         expiresIn: 300,
-        signableHeaders: new Set(["content-type"])
+        signableHeaders
     })
 
     return url;

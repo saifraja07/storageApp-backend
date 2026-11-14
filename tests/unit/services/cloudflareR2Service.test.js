@@ -103,6 +103,15 @@ describe("signed URLs (generated locally, no network)", () => {
     expect(url.searchParams.get("X-Amz-Expires")).toBe("300");
   });
 
+  it("pins the upload size: content-length is part of the signature (M7)", async () => {
+    const url = new URL(
+      await r2.createUploadSignedUrl({ key: "abc.pdf", contentType: "application/pdf", size: 1234, userId: USER }),
+    );
+    const signed = url.searchParams.get("X-Amz-SignedHeaders").split(";");
+    expect(signed).toContain("content-length");
+    expect(signed).toContain("content-type");
+  });
+
   it("creates a signed download URL that forces attachment when asked", async () => {
     const url = new URL(
       await r2.createGetSignedUrl({ key: "abc.pdf", download: true, filename: "My Report.pdf", userId: USER }),

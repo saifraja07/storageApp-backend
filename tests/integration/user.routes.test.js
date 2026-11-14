@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import sharp from "sharp";
+import { Types } from "mongoose";
 import { loadApp, loginAs, loginAsWithDoc, request } from "../helpers/app.js";
 import { redisMock } from "../helpers/redisMock.js";
-import { UserMock, FileMock, DirectoryMock } from "../helpers/modelMocks.js";
+import { UserMock, FileMock, DirectoryMock, SubscriptionMock } from "../helpers/modelMocks.js";
 import { query } from "../helpers/query.js";
 import { oid, signedSidCookie } from "../helpers/fixtures.js";
 import {
@@ -10,6 +11,21 @@ import {
   uploadProfilePicture,
   deleteProfilePicture,
 } from "../../services/cloudflareR2Service.js";
+
+// Razorpay is only reached when a deleted account still has a live subscription.
+const { rzp } = vi.hoisted(() => ({
+  rzp: { subscriptions: { cancel: vi.fn(), fetch: vi.fn() } },
+}));
+vi.mock("razorpay", () => ({
+  default: class {
+    constructor() {
+      return rzp;
+    }
+  },
+}));
+
+const ROOT = new Types.ObjectId("507f1f77bcf86cd799439011"); // has letters, so UPPERCASE differs
+const ROOT_UPPER = ROOT.toString().toUpperCase();
 
 let app;
 beforeAll(async () => {
@@ -19,6 +35,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   redisMock.ft.search.mockResolvedValue({ total: 0, documents: [] });
+  SubscriptionMock.find.mockReturnValue(query([]));
 });
 
 describe("GET /users/me", () => {
@@ -79,6 +96,21 @@ describe("PATCH /users/me/password", () => {
     expect(res.body.message).toBe("Password changed successfully.");
     expect(doc.password).toBe("new-pass"); // hashed by the model's pre-save hook
     expect(doc.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("signs out every OTHER device after a password change but keeps the current session", async () => {
+    const { cookie, user } = loginAsWithDoc({}, {
+      password: "hash",
+      comparePassword: vi.fn().mockResolvedValue(true),
+    });
+    redisMock.ft.search.mockResolvedValue({
+      total: 3,
+      documents: [{ id: "session:test-sid" }, { id: "session:other-1" }, { id: "session:other-2" }],
+    });
+    await request(app).patch("/users/me/password").set("Cookie", cookie).send(valid).expect(200);
+    expect(redisMock.del).toHaveBeenCalledWith("session:other-1", "session:other-2");
+    expect(redisMock.del).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), "session:test-sid");
+    expect(redisMock.del.mock.calls.flat()).not.toContain("session:test-sid");
   });
 
   it("lets a Google-only user set a first password without a current one", async () => {
@@ -232,6 +264,44 @@ describe("account deletion", () => {
     expect(redisMock.del).toHaveBeenCalledWith("session:a");
   });
 
+  describe("hard-delete with a live subscription (H1)", () => {
+    const withLiveSub = () => {
+      const { cookie, user } = loginAs();
+      const subDoc = { _id: oid(), subscriptionId: "sub_live" };
+      FileMock.find.mockReturnValue(query([{ _id: oid(), extension: ".pdf" }]));
+      SubscriptionMock.find.mockReturnValue(query([subDoc]));
+      return { cookie, user, subDoc };
+    };
+
+    it("cancels the Razorpay billing BEFORE deleting anything", async () => {
+      const { cookie, user, subDoc } = withLiveSub();
+      rzp.subscriptions.cancel.mockResolvedValue({});
+
+      await request(app).delete("/users/me").set("Cookie", cookie).expect(200);
+
+      expect(rzp.subscriptions.cancel).toHaveBeenCalledWith("sub_live");
+      expect(SubscriptionMock.updateMany).toHaveBeenCalledWith(
+        { _id: { $in: [subDoc._id] } },
+        expect.objectContaining({ status: "expired" }),
+      );
+      expect(UserMock.findByIdAndDelete).toHaveBeenCalledWith(user._id);
+    });
+
+    it("keeps the account and files if Razorpay refuses to cancel", async () => {
+      const { cookie } = withLiveSub();
+      rzp.subscriptions.cancel.mockRejectedValue(new Error("rzp down"));
+      rzp.subscriptions.fetch.mockResolvedValue({ status: "active" });
+
+      const res = await request(app).delete("/users/me").set("Cookie", cookie).expect(502);
+
+      expect(res.body.error).toMatch(/NOT deleted/);
+      expect(deleteR2Files).not.toHaveBeenCalled();
+      expect(FileMock.deleteMany).not.toHaveBeenCalled();
+      expect(DirectoryMock.deleteMany).not.toHaveBeenCalled();
+      expect(UserMock.findByIdAndDelete).not.toHaveBeenCalled();
+    });
+  });
+
   it("hard-delete never deletes a default or Google avatar from the profile bucket", async () => {
     const { cookie } = loginAs({ picture: "https://lh3.googleusercontent.com/a/abc" });
     FileMock.find.mockReturnValue(query([]));
@@ -252,16 +322,21 @@ describe("account deletion", () => {
 });
 
 describe("POST /users/me/bulk-delete", () => {
+  const claimFrom = (files) =>
+    FileMock.findOneAndDelete.mockImplementation(({ _id }) =>
+      Promise.resolve(files.find((f) => String(f._id) === String(_id)) ?? null),
+    );
+
   it("deletes only the caller's own files and keeps directory sizes in sync", async () => {
     const { cookie, user } = loginAs();
     const [f1, f2] = [oid(), oid()];
     const parent = oid();
-    FileMock.find.mockReturnValue(
-      query([
-        { _id: f1, extension: ".a", size: 10, parentDirId: parent },
-        { _id: f2, extension: ".b", size: 20, parentDirId: parent },
-      ]),
-    );
+    const files = [
+      { _id: f1, extension: ".a", size: 10, parentDirId: parent },
+      { _id: f2, extension: ".b", size: 20, parentDirId: parent },
+    ];
+    FileMock.find.mockReturnValue(query(files));
+    claimFrom(files);
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
 
     const res = await request(app)
@@ -271,12 +346,79 @@ describe("POST /users/me/bulk-delete", () => {
       .expect(200);
 
     expect(FileMock.find.mock.calls[0][0]).toMatchObject({ userId: user._id });
-    expect(deleteR2Files).toHaveBeenCalledWith(
-      [{ Key: `${f1}.a` }, { Key: `${f2}.b` }],
-      user._id,
+    expect(deleteR2Files).toHaveBeenCalledWith([{ Key: `${f1}.a` }, { Key: `${f2}.b` }], user._id);
+    expect(FileMock.findOneAndDelete).toHaveBeenCalledWith({ _id: f1, userId: user._id });
+    expect(FileMock.findOneAndDelete).toHaveBeenCalledWith({ _id: f2, userId: user._id });
+    expect(DirectoryMock.updateMany).toHaveBeenCalledTimes(1); // grouped per folder
+    expect(DirectoryMock.updateMany).toHaveBeenCalledWith(
+      { _id: { $in: [user.rootDirId, parent] } },
+      { $inc: { size: -30 } },
     );
-    expect(FileMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: [f1, f2] } });
     expect(res.body.message).toBe("2 item(s) deleted");
+  });
+
+  it.each([["lowercase", (id) => id], ["UPPERCASE", (id) => id.toUpperCase()]])(
+    "refuses to bulk-delete the root folder, before deleting anything (%s id)",
+    async (_label, asText) => {
+      const { cookie } = loginAs({ rootDirId: ROOT });
+      const otherFile = oid();
+      DirectoryMock.find.mockReturnValue(query([{ _id: ROOT, size: 99, parentDirId: null }]));
+      FileMock.find.mockReturnValue(query([{ _id: otherFile, extension: ".a", size: 1, parentDirId: oid() }]));
+
+      const res = await request(app)
+        .post("/users/me/bulk-delete")
+        .set("Cookie", cookie)
+        .send({ fileIds: [String(otherFile)], directoryIds: [asText(ROOT.toString())] })
+        .expect(403);
+
+      expect(res.body.error).toMatch(/root folder/);
+      expect(deleteR2Files).not.toHaveBeenCalled();
+      expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
+      expect(DirectoryMock.findOneAndDelete).not.toHaveBeenCalled();
+      expect(DirectoryMock.deleteMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects bodies where fileIds / directoryIds are not arrays", async () => {
+    const { cookie } = loginAs();
+    await request(app).post("/users/me/bulk-delete").set("Cookie", cookie).send({ directoryIds: "abc" }).expect(400);
+    await request(app).post("/users/me/bulk-delete").set("Cookie", cookie).send({ fileIds: { $ne: null } }).expect(400);
+  });
+
+  it("releases the reservation (not used storage) for unfinished uploads (B4)", async () => {
+    const { cookie, user } = loginAs();
+    const parent = oid();
+    const files = [
+      { _id: oid(), extension: ".a", size: 10, parentDirId: parent, isUploading: false },
+      { _id: oid(), extension: ".b", size: 40, parentDirId: parent, isUploading: true },
+    ];
+    FileMock.find.mockReturnValue(query(files));
+    claimFrom(files);
+    DirectoryMock.findById.mockReturnValue(query({ path: [] }));
+
+    await request(app)
+      .post("/users/me/bulk-delete")
+      .set("Cookie", cookie)
+      .send({ fileIds: files.map((f) => String(f._id)) })
+      .expect(200);
+
+    expect(UserMock.updateOne).toHaveBeenCalledWith({ _id: user._id }, { $inc: { reservedStorage: -40 } });
+    expect(UserMock.updateOne).toHaveBeenCalledWith({ rootDirId: user.rootDirId }, { $inc: { usedStorageInBytes: -10 } });
+    expect(UserMock.updateOne).not.toHaveBeenCalledWith({ rootDirId: user.rootDirId }, { $inc: { usedStorageInBytes: -50 } });
+  });
+
+  it("does not release anything twice when a repeated request already removed the files", async () => {
+    const { cookie } = loginAs();
+    FileMock.find.mockReturnValue(
+      query([{ _id: oid(), extension: ".mp4", size: 700, parentDirId: oid(), isUploading: true }]),
+    );
+    FileMock.findOneAndDelete.mockResolvedValue(null); // another request won the race
+
+    const res = await request(app).post("/users/me/bulk-delete").set("Cookie", cookie).send({ fileIds: ["x"] }).expect(200);
+
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+    expect(DirectoryMock.updateMany).not.toHaveBeenCalled();
+    expect(res.body.message).toBe("0 item(s) deleted");
   });
 
   it("keeps records untouched when the R2 delete fails", async () => {
@@ -284,13 +426,13 @@ describe("POST /users/me/bulk-delete", () => {
     FileMock.find.mockReturnValue(query([{ _id: oid(), extension: ".a", size: 1, parentDirId: oid() }]));
     deleteR2Files.mockRejectedValue(new Error("R2 down"));
     await request(app).post("/users/me/bulk-delete").set("Cookie", cookie).send({ fileIds: ["x"] }).expect(500);
-    expect(FileMock.deleteMany).not.toHaveBeenCalled();
+    expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
   });
 
   it("skips directories the caller does not own", async () => {
     const { cookie, user } = loginAs();
     FileMock.find.mockReturnValue(query([]));
-    DirectoryMock.findOne.mockReturnValue(query(null));
+    DirectoryMock.find.mockReturnValue(query([])); // nothing owned by the caller matches
     const dirId = String(oid());
 
     const res = await request(app)
@@ -299,7 +441,7 @@ describe("POST /users/me/bulk-delete", () => {
       .send({ directoryIds: [dirId] })
       .expect(200);
 
-    expect(DirectoryMock.findOne).toHaveBeenCalledWith({ _id: dirId, userId: user._id });
+    expect(DirectoryMock.find.mock.calls[0][0]).toEqual({ _id: { $in: [dirId] }, userId: user._id });
     expect(DirectoryMock.deleteMany).not.toHaveBeenCalled();
     expect(res.body.message).toBe("0 item(s) deleted");
   });
@@ -308,11 +450,16 @@ describe("POST /users/me/bulk-delete", () => {
     const { cookie, user } = loginAs();
     const dir = { _id: oid(), size: 30, parentDirId: oid() };
     const child = oid();
-    const innerFile = { _id: oid(), extension: ".txt" };
-    FileMock.find.mockReturnValueOnce(query([])).mockReturnValueOnce(query([innerFile]));
-    DirectoryMock.findOne.mockReturnValue(query(dir));
+    const innerFile = { _id: oid(), extension: ".txt", size: 30, isUploading: false };
+    FileMock.find
+      .mockReturnValueOnce(query([])) // files selected directly
+      .mockReturnValueOnce(query([innerFile])) // tree listing
+      .mockReturnValueOnce(query([innerFile])); // re-read after claiming the folder
+    DirectoryMock.find
+      .mockReturnValueOnce(query([dir])) // the requested folders
+      .mockReturnValueOnce(query([{ _id: child }])); // descendants
+    DirectoryMock.findOneAndDelete.mockResolvedValue(dir);
     DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [child] }]);
-    DirectoryMock.find.mockReturnValue(query([{ _id: child }]));
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
 
     const res = await request(app)
@@ -322,12 +469,33 @@ describe("POST /users/me/bulk-delete", () => {
       .expect(200);
 
     expect(deleteR2Files).toHaveBeenCalledWith([{ Key: `${innerFile._id}.txt` }], user._id);
-    expect(DirectoryMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: [child, dir._id] } });
+    expect(DirectoryMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: [child] } });
     expect(UserMock.updateOne).toHaveBeenCalledWith(
       { rootDirId: user.rootDirId },
       { $inc: { usedStorageInBytes: -30 } },
     );
     expect(res.body.message).toBe("1 item(s) deleted");
+  });
+
+  it("releases the reservation of unfinished uploads inside a deleted folder", async () => {
+    const { cookie, user } = loginAs();
+    const dir = { _id: oid(), size: 0, parentDirId: oid() };
+    const inner = [
+      { _id: oid(), extension: ".mp4", size: 700, isUploading: true },
+      { _id: oid(), extension: ".mp4", size: 300, isUploading: true },
+    ];
+    FileMock.find
+      .mockReturnValueOnce(query([]))
+      .mockReturnValueOnce(query(inner))
+      .mockReturnValueOnce(query(inner));
+    DirectoryMock.find.mockReturnValueOnce(query([dir])).mockReturnValueOnce(query([]));
+    DirectoryMock.findOneAndDelete.mockResolvedValue(dir);
+    DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [] }]);
+    DirectoryMock.findById.mockReturnValue(query({ path: [] }));
+
+    await request(app).post("/users/me/bulk-delete").set("Cookie", cookie).send({ directoryIds: [String(dir._id)] }).expect(200);
+
+    expect(UserMock.updateOne).toHaveBeenCalledWith({ _id: user._id }, { $inc: { reservedStorage: -1000 } });
   });
 });
 

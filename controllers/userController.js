@@ -11,9 +11,9 @@ import {
   isOwnedProfilePictureURL,
 } from "../services/cloudflareR2Service.js";
 import { updateProfileSchema } from "../validators/authSchema.js";
-import { updateDirectorySize } from "../services/storageAccountingService.js";
+import { deleteFiles, deleteDirectoryTree } from "../services/deleteService.js";
+import { cancelUserSubscriptions } from "../services/subscriptionCleanup.js";
 import { deleteUserSessions } from "../utils/sessionUtils.js";
-import { getDirectoryContent } from "../utils/directoryTree.js";
 import { processProfileImage } from "../utils/processProfileImage.js";
 
 export const currentLoggedUser = async (req, res) => {
@@ -135,6 +135,18 @@ export const selfSoftDelete = async (req, res) => {
 
 export const selfHardDelete = async (req, res) => {
   const userId = req.user._id;
+
+  // Stop billing FIRST. If Razorpay refuses we keep the account, otherwise the
+  // customer would keep being charged for something that no longer exists.
+  try {
+    await cancelUserSubscriptions(userId);
+  } catch (err) {
+    console.error(`[user] could not cancel subscriptions of ${userId} before self-deletion:`, err);
+    return res.status(502).json({
+      error: "We couldn't cancel your subscription, so your account was NOT deleted. Please try again in a moment or contact support.",
+    });
+  }
+
   const allFiles = await File.find({ userId })
     .select("_id extension")
     .lean();
@@ -170,6 +182,19 @@ export const bulkDeleteItems = async (req, res) => {
   const { fileIds = [], directoryIds = [] } = req.body;
   const user = req.user;
 
+  if (!Array.isArray(fileIds) || !Array.isArray(directoryIds)) {
+    return res.status(400).json({ error: "fileIds and directoryIds must be arrays." });
+  }
+
+  const directories = directoryIds.length
+    ? await Directory.find({ _id: { $in: directoryIds }, userId: user._id })
+      .select("_id size parentDirId")
+      .lean()
+    : [];
+  if (directories.some(({ _id }) => String(_id) === String(user.rootDirId))) {
+    return res.status(403).json({ error: "The root folder cannot be deleted." });
+  }
+
   let deletedCount = 0;
 
   // ---------- FILES ----------
@@ -178,69 +203,13 @@ export const bulkDeleteItems = async (req, res) => {
     userId: user._id,
   }).lean();
 
-  if (files.length) {
-    const keys = files.map((file) => ({
-      Key: `${file._id}${file.extension}`,
-    }));
-
-    // R2 first, so a failed delete leaves the records (and quota) untouched.
-    await deleteR2Files(keys, user._id);
-    await File.deleteMany({
-      _id: { $in: files.map((f) => f._id) },
-    });
-
-    await Promise.all(
-      files.map((file) =>
-        updateDirectorySize(file.parentDirId, -file.size, user.rootDirId)
-      )
-    );
-
-    deletedCount += files.length;
-  }
+  deletedCount += await deleteFiles(files, user);
 
   // ---------- DIRECTORIES ----------
-  for (const dirId of directoryIds) {
-    const directoryData = await Directory.findOne({
-      _id: dirId,
-      userId: user._id,
-    })
-      .select("_id size parentDirId")
-      .lean();
-
-    if (!directoryData) continue;
-
-    const { files, directories } = await getDirectoryContent(
-      directoryData._id
-    );
-
-    const keys = files.map((file) => ({
-      Key: `${file._id}${file.extension}`,
-    }));
-
-    if (keys.length) {
-      await deleteR2Files(keys, user._id);
+  for (const directoryData of directories) {
+    if (await deleteDirectoryTree(directoryData, user)) {
+      deletedCount++;
     }
-
-    await File.deleteMany({
-      _id: { $in: files.map((f) => f._id) },
-    });
-
-    await Directory.deleteMany({
-      _id: {
-        $in: [
-          ...directories.map((d) => d._id),
-          directoryData._id,
-        ],
-      },
-    });
-
-    await updateDirectorySize(
-      directoryData.parentDirId,
-      -directoryData.size,
-      user.rootDirId
-    );
-
-    deletedCount++;
   }
 
   return res.json({

@@ -17,7 +17,7 @@ vi.mock("google-auth-library", () => ({
 
 describe("getUserFromAuthCode", () => {
   it("exchanges the code, verifies the id_token for our client and returns the profile", async () => {
-    const profile = { name: "Haadi", email: "h@example.com", picture: "p" };
+    const profile = { name: "Haadi", email: "h@example.com", picture: "p", email_verified: true };
     getToken.mockResolvedValue({ tokens: { id_token: "tok" } });
     verifyIdToken.mockResolvedValue({ getPayload: () => profile });
 
@@ -26,6 +26,24 @@ describe("getUserFromAuthCode", () => {
     expect(verifyIdToken).toHaveBeenCalledWith({
       idToken: "tok",
       audience: "test-google-client-id",
+    });
+  });
+
+  it("rejects a Google account whose email is not verified", async () => {
+    getToken.mockResolvedValue({ tokens: { id_token: "tok" } });
+    verifyIdToken.mockResolvedValue({
+      getPayload: () => ({ name: "X", email: "x@example.com", email_verified: false }),
+    });
+    await expect(getUserFromAuthCode("code")).resolves.toEqual({
+      error: "Google account email is not verified!",
+    });
+  });
+
+  it("rejects a payload with no email_verified claim at all", async () => {
+    getToken.mockResolvedValue({ tokens: { id_token: "tok" } });
+    verifyIdToken.mockResolvedValue({ getPayload: () => ({ name: "X", email: "x@example.com" }) });
+    await expect(getUserFromAuthCode("code")).resolves.toEqual({
+      error: "Google account email is not verified!",
     });
   });
 

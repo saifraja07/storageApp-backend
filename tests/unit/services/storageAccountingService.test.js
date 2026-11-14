@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { updateDirectorySize } from "../../../services/storageAccountingService.js";
+import { updateDirectorySize, releaseReservedStorage } from "../../../services/storageAccountingService.js";
 import { UserMock, DirectoryMock } from "../../helpers/modelMocks.js";
 import { query } from "../../helpers/query.js";
 import { oid } from "../../helpers/fixtures.js";
@@ -45,12 +45,34 @@ describe("updateDirectorySize", () => {
     );
   });
 
-  it("does nothing when the parent directory no longer exists", async () => {
+  it("still updates the user's usage when the parent directory no longer exists", async () => {
+    const rootDirId = oid();
     DirectoryMock.findById.mockReturnValue(query(null));
 
-    await updateDirectorySize(oid(), 10, oid());
+    await updateDirectorySize(null, -10, rootDirId);
 
     expect(DirectoryMock.updateMany).not.toHaveBeenCalled();
+    expect(UserMock.updateOne).toHaveBeenCalledWith(
+      { rootDirId },
+      { $inc: { usedStorageInBytes: -10 } },
+    );
+  });
+});
+
+describe("releaseReservedStorage", () => {
+  it("releases only the reservation of unfinished uploads", async () => {
+    const userId = oid();
+    const released = await releaseReservedStorage(userId, [
+      { size: 100, isUploading: true },
+      { size: 50, isUploading: true },
+      { size: 999, isUploading: false },
+    ]);
+    expect(released).toBe(150);
+    expect(UserMock.updateOne).toHaveBeenCalledWith({ _id: userId }, { $inc: { reservedStorage: -150 } });
+  });
+
+  it("does nothing when no file is an unfinished upload", async () => {
+    await releaseReservedStorage(oid(), [{ size: 5, isUploading: false }]);
     expect(UserMock.updateOne).not.toHaveBeenCalled();
   });
 });

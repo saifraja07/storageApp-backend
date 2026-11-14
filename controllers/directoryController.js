@@ -1,10 +1,7 @@
 import File from "../models/fileModel.js";
 import Directory from "../models/directoryModel.js";
-import User from "../models/userModel.js";
-import { updateDirectorySize } from "../services/storageAccountingService.js";
-import { deleteR2Files } from "../services/cloudflareR2Service.js";
+import { deleteDirectoryTree } from "../services/deleteService.js";
 import { createDirectorySchema, renameDirectorySchema } from "../validators/directorySchema.js";
-import { getDirectoryContent } from "../utils/directoryTree.js";
 
 export const readDirectory = async (req, res) => {
   const user = req.user;
@@ -21,8 +18,14 @@ export const readDirectory = async (req, res) => {
     });
   }
 
-  const files = await File.find({ parentDirId: directoryData._id }).lean();
-  const directories = await Directory.find({ parentDirId: _id }).lean();
+  const files = await File.find({
+    parentDirId: directoryData._id,
+    userId: user._id
+  }).lean();
+  const directories = await Directory.find({
+    parentDirId: _id,
+    userId: user._id
+  }).lean();
 
   return res.status(200).json({
     ...directoryData,
@@ -34,7 +37,7 @@ export const readDirectory = async (req, res) => {
 export const createDirectory = async (req, res) => {
   const user = req.user;
   const parentDirId = req.params.parentDirId || user.rootDirId;
-  
+
   const { success, data, error } = createDirectorySchema.safeParse(req.body)
   if (!success) {
     return res.status(400).json({ error: error.issues[0].message });
@@ -57,13 +60,13 @@ export const createDirectory = async (req, res) => {
       ? []
       : [...parentDir.path, parentDir._id];
 
-  const insertedDir = await Directory.create({
+  await Directory.create({
     name: dirname,
     parentDirId,
     userId: user._id,
     path,
   });
-  return res.status(200).json({ message: "Directory Created!" });
+  return res.status(201).json({ message: "Directory Created!" });
 };
 
 export const getDirectoryPath = async (req, res) => {
@@ -74,7 +77,7 @@ export const getDirectoryPath = async (req, res) => {
   }).populate("path", "name _id")
     .select("path name")
     .lean();
-    
+
   if (!dir) {
     return res.status(404).json({ error: "Directory not found" });
   }
@@ -105,6 +108,9 @@ export const renameDirectory = async (req, res) => {
       error: "Directory not found or access denied!",
     });
   }
+  if (String(dirData._id) === String(user.rootDirId)) {
+    return res.status(403).json({ error: "The root folder cannot be renamed." });
+  }
   dirData.name = data.newDirName;
   await dirData.save();
 
@@ -128,34 +134,16 @@ export const deleteDirectory = async (req, res) => {
     });
   }
 
-  const { files, directories } = await getDirectoryContent(directoryData._id);
-
-  const keys = files.map(({ _id, extension }) => ({ Key: `${_id}${extension}` }))
-  if (keys.length) {
-    await deleteR2Files(keys, user._id)
+  if (String(directoryData._id) === String(user.rootDirId)) {
+    return res.status(403).json({ error: "The root folder cannot be deleted." });
   }
 
-  await File.deleteMany({
-    _id: { $in: files.map(({ _id }) => _id) },
-  });
-
-  // Unfinished uploads inside the folder only hold a reservation (they were never
-  // counted in used storage), so release it or it would leak until the account
-  // looks full.
-  const reservedToRelease = files
-    .filter(({ isUploading }) => isUploading)
-    .reduce((sum, { size }) => sum + (size || 0), 0);
-  if (reservedToRelease > 0) {
-    await User.updateOne(
-      { _id: user._id },
-      { $inc: { reservedStorage: -reservedToRelease } }
-    );
+  const deleted = await deleteDirectoryTree(directoryData, user);
+  if (!deleted) {
+    return res.status(404).json({
+      error: "Directory not found or Access denied!",
+    });
   }
-  await Directory.deleteMany({
-    _id: { $in: [...directories.map(({ _id }) => _id), directoryData._id] },
-  });
-
-  await updateDirectorySize(directoryData.parentDirId, -directoryData.size, user.rootDirId)
 
   return res.status(200).json({ message: "Directory Deleted successfully!" });
 };
