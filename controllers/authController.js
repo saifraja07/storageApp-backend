@@ -327,6 +327,10 @@ export const changePassword = async (req, res) => {
 
     await user.save();
 
+    // A changed password must kick out everyone who had the old one: sign out
+    // every other device and keep only the session that made the change.
+    await deleteUserSessions(user._id, { exceptSessionId: req.signedCookies?.sid });
+
     return res.json({
         message: hasPassword
             ? "Password changed successfully."

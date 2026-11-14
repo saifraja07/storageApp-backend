@@ -1,4 +1,3 @@
-import redisClient from "../config/redis.js";
 import Directory from "../models/directoryModel.js";
 import File from "../models/fileModel.js";
 import User from "../models/userModel.js";
@@ -6,7 +5,7 @@ import { deleteR2Files, deleteProfilePicture, getProfilePictureKeyFromURL, isOwn
 import { getTargetUser } from "../utils/getTargetUser.js";
 import { canAssignRole } from "../utils/permissions.js";
 import { roleSchema, userStatusSchema } from "../validators/authSchema.js";
-import { deleteUserSessions } from "../utils/sessionUtils.js";
+import { deleteUserSessions, searchAllSessions } from "../utils/sessionUtils.js";
 import { cancelUserSubscriptions } from "../services/subscriptionCleanup.js";
 
 export const getAllUsers = async (req, res) => {
@@ -15,13 +14,7 @@ export const getAllUsers = async (req, res) => {
         .lean();
 
     // all active redis sessions
-    const allSessions = await redisClient.ft.search(
-        "userIdIdx",
-        "*",
-        {
-            RETURN: ["userId"],
-        }
-    );
+    const allSessions = await searchAllSessions("*", { RETURN: ["userId"] });
     const loggedInUsers = new Set(
         allSessions.documents.map(
             (doc) => doc.value.userId.toString()

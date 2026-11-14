@@ -65,6 +65,7 @@ describe("enforceDeviceLimit", () => {
     expect(redisMock.ft.search).toHaveBeenCalledWith("userIdIdx", "@userId:{u1}", {
       RETURN: [],
       SORTBY: { BY: "createdAt", DIRECTION: "ASC" },
+      LIMIT: { from: 0, size: 1000 },
     });
   });
 
@@ -73,7 +74,10 @@ describe("enforceDeviceLimit", () => {
       .mockRejectedValueOnce(new Error("no such field"))
       .mockResolvedValueOnce(docs("session:a", "session:b"));
     await enforceDeviceLimit("u1", 2);
-    expect(redisMock.ft.search).toHaveBeenLastCalledWith("userIdIdx", "@userId:{u1}", { RETURN: [] });
+    expect(redisMock.ft.search).toHaveBeenLastCalledWith("userIdIdx", "@userId:{u1}", {
+      RETURN: [],
+      LIMIT: { from: 0, size: 1000 },
+    });
     expect(redisMock.del).toHaveBeenCalledWith("session:a");
   });
 });
@@ -89,5 +93,18 @@ describe("deleteUserSessions", () => {
     redisMock.ft.search.mockResolvedValue(docs());
     await deleteUserSessions("u1");
     expect(redisMock.del).not.toHaveBeenCalled();
+  });
+
+  it("sees past the default 10-result page (limit lowered with many sessions open)", async () => {
+    const page1 = Array.from({ length: 1000 }, (_, i) => ({ id: `session:${i}` }));
+    const page2 = Array.from({ length: 5 }, (_, i) => ({ id: `session:x${i}` }));
+    redisMock.ft.search
+      .mockResolvedValueOnce({ total: 1005, documents: page1 })
+      .mockResolvedValueOnce({ total: 1005, documents: page2 });
+    await enforceDeviceLimit("u1", 1004);
+    expect(redisMock.ft.search).toHaveBeenCalledTimes(2);
+    expect(redisMock.ft.search.mock.calls[1][2].LIMIT).toEqual({ from: 1000, size: 1000 });
+    // 1005 sessions, limit 1004 → 2 oldest evicted so the new login fits
+    expect(redisMock.del).toHaveBeenCalledWith("session:0", "session:1");
   });
 });
