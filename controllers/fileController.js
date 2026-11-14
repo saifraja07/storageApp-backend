@@ -2,8 +2,9 @@ import path from "node:path";
 import File from "../models/fileModel.js";
 import Directory from "../models/directoryModel.js";
 import User from "../models/userModel.js";
-import { renameFileSchema } from "../validators/fileSchema.js";
+import { renameFileSchema, uploadInitiateSchema } from "../validators/fileSchema.js";
 import { updateDirectorySize } from "../services/storageAccountingService.js";
+import { deleteFiles } from "../services/deleteService.js";
 import { deleteR2File, createGetSignedUrl, createUploadSignedUrl, getR2FileMetaData } from "../services/cloudflareR2Service.js";
 
 
@@ -67,34 +68,18 @@ export const deleteFile = async (req, res, next) => {
   if (!fileData) {
     return res.status(404).json({ error: "File not found!" });
   }
-
-  await Promise.all([
-    File.findByIdAndDelete(fileId),
-    deleteR2File({
-      key: `${fileId}${fileData.extension}`,
-      userId: req.user._id
-    })
-  ]);
-
-  if (fileData.isUploading) {
-    // An unfinished upload was only ever *reserved*: it was never added to the
-    // directory or used-storage totals, so release the reservation instead.
-    await User.updateOne(
-      { _id: req.user._id },
-      { $inc: { reservedStorage: -fileData.size } }
-    );
-  } else {
-    await updateDirectorySize(
-      fileData.parentDirId,
-      -fileData.size,
-      req.user.rootDirId
-    );
-  }
+  
+  await deleteFiles([fileData], req.user);
   return res.status(200).json({ message: "File Deleted Successfully" });
 };
 
 export const uploadInitiate = async (req, res) => {
-  const parentDirId = req.body.parentDirId || req.user.rootDirId;
+  const parsed = uploadInitiateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0].message });
+  }
+  const { name, size: filesize, parentDirId: bodyParentDirId, contentType } = parsed.data;
+  const parentDirId = bodyParentDirId || req.user.rootDirId;
 
   const parentDir = await Directory.findOne({
     _id: parentDirId,
@@ -107,20 +92,7 @@ export const uploadInitiate = async (req, res) => {
     });
   }
 
-  const filesize = Number(req.body.size);
-
-  if (!Number.isFinite(filesize) || filesize < 0) {
-    return res.status(400).json({
-      error: "Invalid filesize!",
-    });
-  }
-
-  const filename = path.basename(
-    decodeURIComponent(
-      req.body.name || "untitled"
-    )
-  );
-
+  const filename = path.basename(name || "untitled") || "untitled";
   const extension = path.extname(filename);
 
   const user = await User.findOneAndUpdate(
@@ -167,7 +139,8 @@ export const uploadInitiate = async (req, res) => {
 
     const signedUrl = await createUploadSignedUrl({
       key: `${file.id}${extension}`,
-      contentType: req.body.contentType,
+      size: filesize,
+      contentType,
       userId: req.user._id
     })
 

@@ -7,6 +7,7 @@ import {
   createGetSignedUrl,
   createUploadSignedUrl,
   deleteR2File,
+  deleteR2Files,
   getR2FileMetaData,
 } from "../../services/cloudflareR2Service.js";
 
@@ -86,6 +87,19 @@ describe("PATCH /files/:fileId (rename)", () => {
     expect(file.name).toBe("new.txt");
     expect(file.save).toHaveBeenCalledTimes(1);
   });
+
+  it("renames the file with a trimmed name", async () => {
+    const { cookie } = loginAs();
+    const file = { name: "old.txt", save: vi.fn().mockResolvedValue(undefined) };
+    FileMock.findOne.mockResolvedValue(file);
+    await request(app)
+      .patch(`/files/${VALID_ID}`)
+      .set("Cookie", cookie)
+      .send({ newFilename: "  new.txt  " })
+      .expect(200);
+    expect(file.name).toBe("new.txt");
+    expect(file.save).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("DELETE /files/:fileId", () => {
@@ -93,20 +107,21 @@ describe("DELETE /files/:fileId", () => {
     const { cookie } = loginAs();
     FileMock.findOne.mockReturnValue(query(null));
     await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(404);
-    expect(deleteR2File).not.toHaveBeenCalled();
+    expect(deleteR2Files).not.toHaveBeenCalled();
   });
 
   it("removes the record and R2 object and frees the storage", async () => {
     const { cookie, user } = loginAs();
     const parentDirId = oid();
-    FileMock.findOne.mockReturnValue(query({ extension: ".png", size: 4096, parentDirId }));
+    const doc = { _id: VALID_ID, extension: ".png", size: 4096, parentDirId, isUploading: false };
+    FileMock.findOne.mockReturnValue(query(doc));
+    FileMock.findOneAndDelete.mockResolvedValue(doc);
     DirectoryMock.findById.mockReturnValue(query({ path: [] }));
-    deleteR2File.mockResolvedValue({});
 
     await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
 
-    expect(FileMock.findByIdAndDelete).toHaveBeenCalledWith(VALID_ID);
-    expect(deleteR2File).toHaveBeenCalledWith({ key: `${VALID_ID}.png`, userId: user._id });
+    expect(deleteR2Files).toHaveBeenCalledWith([{ Key: `${VALID_ID}.png` }], user._id);
+    expect(FileMock.findOneAndDelete).toHaveBeenCalledWith({ _id: VALID_ID, userId: user._id });
     expect(DirectoryMock.updateMany).toHaveBeenCalledWith(
       { _id: { $in: [user.rootDirId, parentDirId] } },
       { $inc: { size: -4096 } },
@@ -116,13 +131,36 @@ describe("DELETE /files/:fileId", () => {
       { $inc: { usedStorageInBytes: -4096 } },
     );
   });
+
+  it("does not release storage twice when another request already removed the file", async () => {
+    const { cookie } = loginAs();
+    FileMock.findOne.mockReturnValue(query({ _id: VALID_ID, extension: ".png", size: 4096, parentDirId: oid() }));
+    FileMock.findOneAndDelete.mockResolvedValue(null); // lost the race
+
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
+
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+    expect(DirectoryMock.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps the record and the quota when R2 deletion fails", async () => {
+    const { cookie } = loginAs();
+    FileMock.findOne.mockReturnValue(query({ _id: VALID_ID, extension: ".png", size: 5, parentDirId: oid() }));
+    deleteR2Files.mockRejectedValue(new Error("R2 down"));
+
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(500);
+
+    expect(FileMock.findOneAndDelete).not.toHaveBeenCalled();
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+  });
 });
 
 describe("DELETE /files/:fileId (unfinished upload)", () => {
   it("releases the reservation instead of touching directory/used-storage totals", async () => {
     const { cookie, user } = loginAs();
-    FileMock.findOne.mockReturnValue(query({ extension: ".mp4", size: 2048, parentDirId: oid(), isUploading: true }));
-    deleteR2File.mockResolvedValue({});
+    const doc = { _id: VALID_ID, extension: ".mp4", size: 2048, parentDirId: oid(), isUploading: true };
+    FileMock.findOne.mockReturnValue(query(doc));
+    FileMock.findOneAndDelete.mockResolvedValue(doc);
 
     await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
 
@@ -134,6 +172,23 @@ describe("DELETE /files/:fileId (unfinished upload)", () => {
     expect(UserMock.updateOne).not.toHaveBeenCalledWith(
       { rootDirId: user.rootDirId },
       expect.anything(),
+    );
+  });
+
+  it("uses the state at the moment of deletion: an upload that finished a second ago counts as used storage", async () => {
+    const { cookie, user } = loginAs();
+    const parentDirId = oid();
+    // the first read still says "uploading", but by the time we claim it the upload completed
+    FileMock.findOne.mockReturnValue(query({ _id: VALID_ID, extension: ".mp4", size: 100, parentDirId, isUploading: true }));
+    FileMock.findOneAndDelete.mockResolvedValue({ _id: VALID_ID, extension: ".mp4", size: 100, parentDirId, isUploading: false });
+    DirectoryMock.findById.mockReturnValue(query({ path: [] }));
+
+    await request(app).delete(`/files/${VALID_ID}`).set("Cookie", cookie).expect(200);
+
+    expect(UserMock.updateOne).not.toHaveBeenCalledWith({ _id: user._id }, expect.anything());
+    expect(UserMock.updateOne).toHaveBeenCalledWith(
+      { rootDirId: user.rootDirId },
+      { $inc: { usedStorageInBytes: -100 } },
     );
   });
 });
@@ -193,8 +248,51 @@ describe("POST /files/uploads/initiate", () => {
     expect(createUploadSignedUrl).toHaveBeenCalledWith({
       key: "file-123.JPG",
       contentType: "image/jpeg",
+      size: 2048, // pinned into the signature (M7)
       userId: user._id,
     });
+  });
+
+  it("accepts a file name containing a literal % (B1)", async () => {
+    const { cookie, user } = loginAs();
+    DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId }));
+    UserMock.findOneAndUpdate.mockReturnValue(query(user));
+    FileMock.insertOne.mockResolvedValue({ id: "f" });
+    createUploadSignedUrl.mockResolvedValue("https://signed.example/u");
+
+    await initiate(cookie, { name: "100%.pdf", size: 1 }).expect(200);
+    expect(FileMock.insertOne.mock.calls[0][0]).toMatchObject({ name: "100%.pdf", extension: ".pdf" });
+  });
+
+  it("does not URI-decode the name: a%20b.txt stays a%20b.txt (B1)", async () => {
+    const { cookie, user } = loginAs();
+    DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId }));
+    UserMock.findOneAndUpdate.mockReturnValue(query(user));
+    FileMock.insertOne.mockResolvedValue({ id: "f" });
+    createUploadSignedUrl.mockResolvedValue("https://signed.example/u");
+
+    await initiate(cookie, { name: "a%20b.txt", size: 1 }).expect(200);
+    expect(FileMock.insertOne.mock.calls[0][0]).toMatchObject({ name: "a%20b.txt" });
+  });
+
+  it("stores the name exactly as sent (no HTML-escaping, no URL-decoding)", async () => {
+    const { cookie, user } = loginAs();
+    DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId }));
+    UserMock.findOneAndUpdate.mockReturnValue(query(user));
+    FileMock.insertOne.mockResolvedValue({ id: "f" });
+    createUploadSignedUrl.mockResolvedValue("https://signed.example/u");
+
+    await initiate(cookie, { name: "R&D <plan>.pdf", size: 1 }).expect(200);
+    expect(FileMock.insertOne.mock.calls[0][0]).toMatchObject({ name: "R&D <plan>.pdf" });
+  });
+
+  it("validates the body with a schema: bad parentDirId / size / name → 400 (B1)", async () => {
+    const { cookie } = loginAs();
+    await initiate(cookie, { name: "a.txt", size: 1, parentDirId: "nope" }).expect(400);
+    await initiate(cookie, { name: "a.txt", size: -5 }).expect(400);
+    await initiate(cookie, { name: "a.txt", size: "abc" }).expect(400);
+    await initiate(cookie, { name: "x".repeat(300), size: 1 }).expect(400);
+    expect(DirectoryMock.findOne).not.toHaveBeenCalled();
   });
 
   it("strips directory components from file names (path traversal)", async () => {
@@ -204,7 +302,7 @@ describe("POST /files/uploads/initiate", () => {
     FileMock.insertOne.mockResolvedValue({ id: "f" });
     createUploadSignedUrl.mockResolvedValue("https://signed.example/u");
 
-    await initiate(cookie, { name: encodeURIComponent("../../etc/passwd.txt"), size: 1 }).expect(200);
+    await initiate(cookie, { name: "../../etc/passwd.txt", size: 1 }).expect(200);
 
     expect(FileMock.insertOne.mock.calls[0][0]).toMatchObject({ name: "passwd.txt", extension: ".txt" });
   });

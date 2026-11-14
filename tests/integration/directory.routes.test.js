@@ -4,6 +4,7 @@ import { UserMock, FileMock, DirectoryMock } from "../helpers/modelMocks.js";
 import { query } from "../helpers/query.js";
 import { oid } from "../helpers/fixtures.js";
 import { deleteR2Files } from "../../services/cloudflareR2Service.js";
+import { Types } from "mongoose";
 
 let app;
 beforeAll(async () => {
@@ -11,6 +12,8 @@ beforeAll(async () => {
 });
 
 const VALID_ID = "507f1f77bcf86cd799439011";
+const ROOT = new Types.ObjectId("507f1f77bcf86cd799439011"); // has letters, so UPPERCASE differs
+
 
 describe("directory id validation", () => {
   it.each([
@@ -158,6 +161,21 @@ describe("PATCH /directories/:directoryId (rename)", () => {
       .expect(404);
   });
 
+  it.each([["lowercase", (id) => id], ["UPPERCASE", (id) => id.toUpperCase()]])(
+    "refuses to rename the root folder (%s id in the URL)",
+    async (_label, asText) => {
+      const { cookie } = loginAs({ rootDirId: ROOT });
+      const root = { _id: ROOT, name: "root", save: vi.fn() };
+      DirectoryMock.findOne.mockResolvedValue(root);
+      await request(app)
+        .patch(`/directories/${asText(ROOT.toString())}`)
+        .set("Cookie", cookie)
+        .send({ newDirName: "Hacked" })
+        .expect(403);
+      expect(root.save).not.toHaveBeenCalled();
+    },
+  );
+
   it("renames an owned directory using the sanitised name", async () => {
     const { cookie, user } = loginAs();
     const dir = { name: "Old", save: vi.fn().mockResolvedValue(undefined) };
@@ -176,6 +194,18 @@ describe("PATCH /directories/:directoryId (rename)", () => {
 });
 
 describe("DELETE /directories/:directoryId", () => {
+  it.each([["lowercase", (id) => id], ["UPPERCASE", (id) => id.toUpperCase()]])(
+    "refuses to delete the user's root folder (%s id in the URL)",
+    async (_label, asText) => {
+      const { cookie } = loginAs({ rootDirId: ROOT });
+      DirectoryMock.findOne.mockReturnValue(query({ _id: ROOT, size: 10, parentDirId: null }));
+      await request(app).delete(`/directories/${asText(ROOT.toString())}`).set("Cookie", cookie).expect(403);
+      expect(deleteR2Files).not.toHaveBeenCalled();
+      expect(DirectoryMock.findOneAndDelete).not.toHaveBeenCalled();
+      expect(DirectoryMock.deleteMany).not.toHaveBeenCalled();
+    },
+  );
+
   it("returns 404 for someone else's directory", async () => {
     const { cookie } = loginAs();
     DirectoryMock.findOne.mockReturnValue(query(null));
@@ -192,6 +222,7 @@ describe("DELETE /directories/:directoryId", () => {
       { _id: oid(), extension: ".pdf" },
     ];
     DirectoryMock.findOne.mockReturnValue(query(dir));
+    DirectoryMock.findOneAndDelete.mockResolvedValue(dir);
     DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [child] }]);
     FileMock.find.mockReturnValue(query(files));
     DirectoryMock.find.mockReturnValue(query([{ _id: child }]));
@@ -204,7 +235,7 @@ describe("DELETE /directories/:directoryId", () => {
       user._id,
     );
     expect(FileMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: files.map((f) => f._id) } });
-    expect(DirectoryMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: [child, dir._id] } });
+    expect(DirectoryMock.deleteMany).toHaveBeenCalledWith({ _id: { $in: [child] } });
     expect(DirectoryMock.updateMany).toHaveBeenCalledWith(
       { _id: { $in: [user.rootDirId, dir.parentDirId] } },
       { $inc: { size: -500 } },
@@ -224,6 +255,7 @@ describe("DELETE /directories/:directoryId", () => {
       { _id: oid(), extension: ".png", size: 50, isUploading: false },
     ];
     DirectoryMock.findOne.mockReturnValue(query(dir));
+    DirectoryMock.findOneAndDelete.mockResolvedValue(dir);
     DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [] }]);
     FileMock.find.mockReturnValue(query(files));
     DirectoryMock.find.mockReturnValue(query([]));
@@ -235,6 +267,21 @@ describe("DELETE /directories/:directoryId", () => {
       { _id: user._id },
       { $inc: { reservedStorage: -1000 } },
     );
+  });
+
+  it("does no accounting when another request already deleted the folder", async () => {
+    const { cookie } = loginAs();
+    const dir = { _id: oid(), size: 500, parentDirId: oid() };
+    DirectoryMock.findOne.mockReturnValue(query(dir));
+    DirectoryMock.findOneAndDelete.mockResolvedValue(null); // lost the race
+    DirectoryMock.aggregate.mockResolvedValue([{ descendantIds: [] }]);
+    FileMock.find.mockReturnValue(query([]));
+    DirectoryMock.find.mockReturnValue(query([]));
+
+    await request(app).delete(`/directories/${dir._id}`).set("Cookie", cookie).expect(404);
+
+    expect(UserMock.updateOne).not.toHaveBeenCalled();
+    expect(FileMock.deleteMany).not.toHaveBeenCalled();
   });
 
   it("keeps all records when R2 deletion fails", async () => {
