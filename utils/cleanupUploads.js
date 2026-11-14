@@ -14,28 +14,26 @@ export async function cleanupUploads() {
     },
   });
 
-  for (const file of staleFiles) {
+  for (const stale of staleFiles) {
     try {
-      // Remove the R2 object first, from the account that owns the file. If
-      // that fails, the record is kept and retried on the next run instead of
-      // being deleted while its object lingers in the bucket.
-      await deleteR2File({
-        key: `${file._id}${file.extension}`,
-        userId: file.userId,
+      const claimed = await File.findOneAndDelete({
+        _id: stale._id,
+        isUploading: true,
+        createdAt: { $lt: cutoff },
       });
+      if (!claimed) continue;
 
-      await Promise.all([
-        User.updateOne(
-          { _id: file.userId },
-          {
-            $inc: {
-              reservedStorage: -file.size,
-            },
-          }
-        ),
-        file.deleteOne(),
-      ]);
+      await User.updateOne(
+        { _id: claimed.userId },
+        { $inc: { reservedStorage: -claimed.size } }
+      );
 
+      await deleteR2File({
+        key: `${claimed._id}${claimed.extension}`,
+        userId: claimed.userId,
+      }).catch((err) => {
+        console.error("cleanupUploads: could not delete R2 object", `${claimed._id}${claimed.extension}`, err);
+      });
     } catch (err) {
       console.error(err);
     }
