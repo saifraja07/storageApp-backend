@@ -66,7 +66,7 @@ describe("POST /subscriptions (create)", () => {
     expect(rzp.subscriptions.create).toHaveBeenCalledWith(
       expect.objectContaining({
         plan_id: PLAN_ID,
-        total_count: 12,
+        total_count: 120, // monthly plan → 10 years
         notes: { userId: user._id.toString() },
       }),
     );

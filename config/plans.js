@@ -1,4 +1,3 @@
-
 export const FREE_PLAN = {
   storage: 0.5 * 1024 ** 3, // 512 MB
   deviceLimit: 1,
@@ -22,4 +21,9 @@ export const PLAN_DETAILS = {
   plan_T7QTobe7VSThyp: { name: "Premium", cycle: "monthly", price: 499 },
   plan_T7QPutFKX9ueS5: { name: "Pro", cycle: "yearly", price: 1599 },
   plan_T7QV7r2nId24Vo: { name: "Premium", cycle: "yearly", price: 4999 },
+};
+
+export const SUBSCRIPTION_TOTAL_COUNT = {
+  monthly: 120, // 10 years of monthly charges
+  yearly: 10,   // 10 years of yearly charges
 };
