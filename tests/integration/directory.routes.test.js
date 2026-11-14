@@ -79,7 +79,7 @@ describe("POST /directories[/:parentDirId/children] (create)", () => {
     const { cookie, user } = loginAs();
     DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId, path: [] }));
 
-    await request(app).post("/directories").set("Cookie", cookie).send({ dirname: "Photos" }).expect(200);
+    await request(app).post("/directories").set("Cookie", cookie).send({ dirname: "Photos" }).expect(201);
 
     expect(DirectoryMock.create).toHaveBeenCalledWith({
       name: "Photos",
@@ -94,7 +94,7 @@ describe("POST /directories[/:parentDirId/children] (create)", () => {
     const [a, parent] = [oid(), oid()];
     DirectoryMock.findOne.mockReturnValue(query({ _id: parent, path: [a] }));
 
-    await request(app).post(`/directories/${parent}/children`).set("Cookie", cookie).send({ dirname: "Deep" }).expect(200);
+    await request(app).post(`/directories/${parent}/children`).set("Cookie", cookie).send({ dirname: "Deep" }).expect(201);
 
     expect(DirectoryMock.create).toHaveBeenCalledWith(
       expect.objectContaining({ path: [a, parent], userId: user._id }),
@@ -104,7 +104,7 @@ describe("POST /directories[/:parentDirId/children] (create)", () => {
   it("names the folder 'New Folder' when no name is given", async () => {
     const { cookie, user } = loginAs();
     DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId, path: [] }));
-    await request(app).post("/directories").set("Cookie", cookie).send({}).expect(200);
+    await request(app).post("/directories").set("Cookie", cookie).send({}).expect(201);
     expect(DirectoryMock.create).toHaveBeenCalledWith(expect.objectContaining({ name: "New Folder" }));
   });
 
@@ -115,7 +115,7 @@ describe("POST /directories[/:parentDirId/children] (create)", () => {
       .post("/directories")
       .set("Cookie", cookie)
       .send({ dirname: "<img src=x onerror=alert(1)>Docs" })
-      .expect(200);
+      .expect(201);
     const created = DirectoryMock.create.mock.calls[0][0];
     expect(created.name).toBe("Docs");
   });
