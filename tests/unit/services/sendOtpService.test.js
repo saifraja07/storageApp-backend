@@ -24,8 +24,8 @@ beforeEach(() => {
 });
 
 describe("sendOtpService", () => {
-  it("stores a 4-digit OTP for the email and e-mails it", async () => {
-    randomInt.mockReturnValue(5500);
+  it("stores a 6-digit OTP for the email and e-mails it", async () => {
+    randomInt.mockReturnValue(550012);
     OtpMock.findOneAndUpdate.mockResolvedValue({});
     sendMock.mockResolvedValue({ id: "msg_1" });
 
@@ -34,22 +34,22 @@ describe("sendOtpService", () => {
     expect(result).toEqual({ success: true, message: "OTP sent successfully" });
     expect(OtpMock.findOneAndUpdate).toHaveBeenCalledWith(
       { email: "user@example.com" },
-      expect.objectContaining({ otp: 5500, attempts: 0 }),
+      expect.objectContaining({ otp: 550012, attempts: 0 }),
       { upsert: true },
     );
     const mail = sendMock.mock.calls[0][0];
     expect(mail.to).toBe("user@example.com");
-    expect(mail.html).toContain("5500");
+    expect(mail.html).toContain("550012");
   });
 
-  it("draws the OTP from a cryptographically secure 4-digit range (1000-9999)", async () => {
-    randomInt.mockReturnValue(1234);
+  it("draws the OTP from a cryptographically secure 6-digit range (100000-999999)", async () => {
+    randomInt.mockReturnValue(123456);
     OtpMock.findOneAndUpdate.mockResolvedValue({});
     sendMock.mockResolvedValue({});
 
     await sendOtpService("a@b.co");
 
-    expect(randomInt).toHaveBeenCalledWith(1000, 10000); // upper bound is exclusive
+    expect(randomInt).toHaveBeenCalledWith(100000, 1000000); // upper bound is exclusive
   });
 
   it("returns a failure result (does not throw) when e-mail delivery fails", async () => {

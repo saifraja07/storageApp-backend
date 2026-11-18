@@ -20,7 +20,7 @@ export const registerSchema = loginSchema.extend({
     .max(50, "Name cannot exceed 50 characters"),
   otp: z
     .string()
-    .regex(/^\d{4}$/, "Please enter a valid 4 digit OTP"),
+    .regex(/^\d{6}$/, "Please enter a valid 6 digit OTP"),
 });
 
 export const verifyOtpSchema = registerSchema.pick({
