@@ -18,12 +18,12 @@ const router = express.Router();
 router.get("/active", getActiveSubscription);
 
 // The customer's whole billing history (all subscriptions, from our payment ledger)
-router.get("/payments", rateLimiter(15 * 60 * 1000, 20), getMyPayments);
+router.get("/payments", rateLimiter(15 * 60 * 1000, 20, "subs-payments"), getMyPayments);
 
 // Verify Razorpay signature after checkout — does NOT activate premium
 router.post(
   "/verify",
-  rateLimiter(15 * 60 * 1000, 10),
+  rateLimiter(15 * 60 * 1000, 10, "subs-verify"),
   verifySubscription,
 );
 
@@ -32,28 +32,28 @@ router.post(
 // Tight rate-limit on subscription creation — 5 attempts per 15 min per IP
 router.post(
   "/",
-  rateLimiter(15 * 60 * 1000, 5),
+  rateLimiter(15 * 60 * 1000, 5, "subs-create"),
   createSubscription
 );
 
 // Cancel is user-initiated — a generous limit is fine
 router.post(
   "/:subscriptionId/cancel",
-  rateLimiter(15 * 60 * 1000, 10),
+  rateLimiter(15 * 60 * 1000, 10, "subs-cancel"),
   cancelSubscription
 );
 
 // Returns the Razorpay-hosted URL where the user can update their payment method
 router.get(
   "/:subscriptionId/payment-method/update-link",
-  rateLimiter(15 * 60 * 1000, 10),
+  rateLimiter(15 * 60 * 1000, 10, "subs-update-link"),
   getUpdatePaymentLink
 );
 
 // Payment history for a subscription
 router.get(
   "/:subscriptionId/payments",
-  rateLimiter(15 * 60 * 1000, 20),
+  rateLimiter(15 * 60 * 1000, 20, "subs-history"),
   getPaymentHistory
 );
 

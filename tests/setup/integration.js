@@ -65,5 +65,6 @@ vi.mock("../../services/storageService.js", () => ({
 // The real limiter is covered in tests/unit/middleware/limiter.test.js.
 vi.mock("../../middleWares/limiterMiddleware.js", () => ({
   rateLimiter: () => (_req, _res, next) => next(),
+  emailRateLimiter: () => (_req, _res, next) => next(),
   throttle: () => (_req, _res, next) => next(),
 }));
