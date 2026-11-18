@@ -12,7 +12,7 @@ router.get("/dashboard/plans", requireRole("Manager"), getPlansDashboard);
 
 router.get("/dashboard/storage/usage", requireRole("Admin"), getStorageUsage);
 
-router.post("/dashboard/storage/usage/refresh", requireRole("Admin"), rateLimiter(60 * 1000, 6), refreshStorageUsage);
+router.post("/dashboard/storage/usage/refresh", requireRole("Admin"), rateLimiter(60 * 1000, 6, "admin-storage-refresh"), refreshStorageUsage);
 
 router.post("/users/:userId/sessions/revoke", requireRole("Manager"), revokeUserSessions);
 

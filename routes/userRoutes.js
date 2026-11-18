@@ -9,10 +9,11 @@ const router = express.Router();
 
 router.get("/me", currentLoggedUser);
 
-router.patch("/me/profile", rateLimiter(15 * 60 * 1000, 10),
+router.patch("/me/profile", rateLimiter(15 * 60 * 1000, 10, "users-profile"),
     profileUpload, updateProfile);
 
-router.patch("/me/password", changePassword);
+router.patch("/me/password", rateLimiter(15 * 60 * 1000, 5, "users-password"),
+    changePassword);
 
 router.patch("/me/deactivation", selfSoftDelete);
 

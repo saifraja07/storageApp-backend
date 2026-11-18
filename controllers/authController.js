@@ -20,7 +20,7 @@ const MAX_OTP_ATTEMPTS = 5;
 const DUMMY_PASSWORD_HASH = "$2b$12$RYWsiRMDdUAzh5E1boFpSeeNV9doPXgM6Ed7n8/l.olJX.pRWfBRK";
 
 // Counts a wrong OTP guess for this email and invalidates the code after
-// MAX_OTP_ATTEMPTS, so a 4-digit code can't be brute-forced. Never throws.
+// MAX_OTP_ATTEMPTS, so a 6-digit code can't be brute-forced. Never throws.
 async function recordFailedOtpAttempt(email) {
     try {
         const record = await OTP.findOneAndUpdate(

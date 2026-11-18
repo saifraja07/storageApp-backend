@@ -6,7 +6,7 @@ const resend = new Resend(process.env.RESEND_KEY);
 
 export async function sendOtpService(email) {
 
-  const otp = randomInt(1000, 10000); // 4 digits, cryptographically secure
+  const otp = randomInt(100000, 1000000); // 6 digits, cryptographically secure
   try {
 
     await OTP.findOneAndUpdate(

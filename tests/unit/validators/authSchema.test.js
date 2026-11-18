@@ -14,7 +14,7 @@ const validRegister = {
   name: "Haadi",
   email: "USER@Example.com",
   password: "secret",
-  otp: "1234",
+  otp: "123456",
 };
 
 describe("loginSchema", () => {
@@ -46,9 +46,11 @@ describe("registerSchema", () => {
     ["short name", { name: "ab" }],
     ["long name", { name: "x".repeat(51) }],
     ["3 digit otp", { otp: "123" }],
+    ["4 digit otp", { otp: "1234" }],
     ["5 digit otp", { otp: "12345" }],
-    ["non-numeric otp", { otp: "12ab" }],
-    ["numeric (non-string) otp", { otp: 1234 }],
+    ["7 digit otp", { otp: "1234567" }],
+    ["non-numeric otp", { otp: "12ab56" }],
+    ["numeric (non-string) otp", { otp: 123456 }],
   ])("rejects %s", (_label, patch) => {
     expect(registerSchema.safeParse({ ...validRegister, ...patch }).success).toBe(false);
   });
@@ -59,8 +61,8 @@ describe("otp schemas", () => {
     expect(sendOtpSchema.safeParse({ email: "a@b.co" }).success).toBe(true);
     expect(sendOtpSchema.safeParse({ email: "nope" }).success).toBe(false);
   });
-  it("verifyOtpSchema needs email and a 4 digit otp", () => {
-    expect(verifyOtpSchema.safeParse({ email: "a@b.co", otp: "0001" }).success).toBe(true);
+  it("verifyOtpSchema needs email and a 6 digit otp", () => {
+    expect(verifyOtpSchema.safeParse({ email: "a@b.co", otp: "000001" }).success).toBe(true);
     expect(verifyOtpSchema.safeParse({ email: "a@b.co", otp: "1" }).success).toBe(false);
     expect(verifyOtpSchema.safeParse({ email: "a@b.co" }).success).toBe(false);
   });

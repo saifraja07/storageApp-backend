@@ -6,7 +6,7 @@ The API server for Haadi Cloud, a cloud storage platform. Built with Express 5 a
 
 - **Node.js** (ESM) + **Express 5** — HTTP server and routing
 - **MongoDB** + **Mongoose** — primary data store
-- **Redis Stack** — session storage (via `redis` client; needs the **RedisJSON** and **RediSearch** modules)
+- **Redis Stack** — session storage and rate-limit counters (via `redis` client and `rate-limit-redis`; sessions need the **RedisJSON** and **RediSearch** modules)
 - **Cloudflare R2** (`@aws-sdk/client-s3`, S3-compatible API) — file storage, with presigned URLs for direct client uploads; a second, dedicated public R2 bucket + Cloudflare CDN domain serves profile images
 - **multer** + **sharp** (+ **heic-convert** for iPhone HEIC/HEIF uploads) — profile picture upload handling and normalization to WebP
 - **Google Auth Library** — Google OAuth login

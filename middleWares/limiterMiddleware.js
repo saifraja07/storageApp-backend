@@ -1,16 +1,71 @@
-import { rateLimit } from 'express-rate-limit';
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
+import { RedisStore } from 'rate-limit-redis';
+import redisClient from '../config/redis.js';
 
+// A Redis that is down or reconnecting queues commands instead of failing them,
+// which would hang the request. Give up after a moment so `passOnStoreError`
+// can let the request through.
+const STORE_TIMEOUT_MS = 1000;
 
-export const rateLimiter = (windowMs, limit) => rateLimit({
-    windowMs,
-    limit,
-    message: {
-        error: "Too many requests. Please try again in a few minutes."
-    },
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    ipv6Subnet: 56,
-});
+const sendCommand = async (...args) => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error("Rate limit store timed out")),
+            STORE_TIMEOUT_MS
+        );
+    });
+    try {
+        return await Promise.race([redisClient.sendCommand(args), timeout]);
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+// Counters live in Redis, so every Lambda instance (or PM2 worker) shares them and
+// they survive restarts. `name` gives each limiter its own key prefix, otherwise
+// two routes with the same window and limit would share one counter.
+const buildLimiter = (name, windowMs, limit, extra = {}) => {
+    if (!name) throw new Error("rate limiter needs a unique name");
+
+    return rateLimit({
+        windowMs,
+        limit,
+        message: {
+            error: "Too many requests. Please try again in a few minutes."
+        },
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        // Names the policy in the RateLimit headers, so a route's IP and e-mail
+        // limiters don't both show up as the same "5-in-15min".
+        identifier: name,
+        // If Redis is briefly unavailable, let the request through instead of
+        // locking every user out.
+        passOnStoreError: true,
+        store: new RedisStore({
+            sendCommand,
+            prefix: `rl:${name}:`,
+        }),
+        ...extra,
+    });
+};
+
+// Limits per client IP.
+export const rateLimiter = (windowMs, limit, name) =>
+    buildLimiter(name, windowMs, limit, { ipv6Subnet: 56 });
+
+// Limits per e-mail address in the request body, so rotating IPs doesn't help
+// someone hammering one account.
+export const emailRateLimiter = (windowMs, limit, name) =>
+    buildLimiter(name, windowMs, limit, {
+        keyGenerator: (req) => {
+            const email = req.body?.email;
+            // Oversized values can't be a real address; don't build huge Redis keys.
+            return typeof email === "string" && email.trim() && email.length <= 254
+                ? `email:${email.trim().toLowerCase()}`
+                : ipKeyGenerator(req.ip, 56);
+        },
+    });
 
 
 export function throttle({
