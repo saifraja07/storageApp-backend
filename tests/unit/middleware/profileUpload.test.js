@@ -22,12 +22,12 @@ describe("profileUpload middleware", () => {
     expect(res.body.hasFile).toBe(false);
   });
 
-  it("rejects files larger than 5 MB with a clear message", async () => {
+  it("rejects files larger than 4 MB with a clear message", async () => {
     const res = await request(app)
       .post("/upload")
-      .attach("picture", Buffer.alloc(5 * 1024 * 1024 + 1), "big.png")
+      .attach("picture", Buffer.alloc(4 * 1024 * 1024 + 1), "big.png")
       .expect(400);
-    expect(res.body).toEqual({ error: "Profile image must be 5 MB or smaller." });
+    expect(res.body).toEqual({ error: "Profile image must be 4 MB or smaller." });
   });
 
   it("rejects files sent under the wrong field name", async () => {

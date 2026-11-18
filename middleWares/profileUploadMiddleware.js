@@ -1,6 +1,8 @@
 import multer from "multer";
 
-const MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+// Kept at 4 MB so the base64-encoded request still fits Lambda's 6 MB limit.
+// request payload limit (4 MB becomes roughly 5.6 MB).
+const MAX_PROFILE_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB
 
 const storage = multer.memoryStorage();
 
@@ -23,7 +25,7 @@ export const profileUpload = (req, res, next) => {
         if (err instanceof multer.MulterError) {
             if (err.code === "LIMIT_FILE_SIZE") {
                 return res.status(400).json({
-                    error: "Profile image must be 5 MB or smaller.",
+                    error: "Profile image must be 4 MB or smaller.",
                 });
             }
             return res.status(400).json({

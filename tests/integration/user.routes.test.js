@@ -233,9 +233,9 @@ describe("PATCH /users/me/profile", () => {
     const res = await request(app)
       .patch("/users/me/profile")
       .set("Cookie", cookie)
-      .attach("picture", Buffer.alloc(5 * 1024 * 1024 + 1), "big.png")
+      .attach("picture", Buffer.alloc(4 * 1024 * 1024 + 1), "big.png")
       .expect(400);
-    expect(res.body.error).toBe("Profile image must be 5 MB or smaller.");
+    expect(res.body.error).toBe("Profile image must be 4 MB or smaller.");
   });
 });
 
