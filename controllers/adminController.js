@@ -1,40 +1,96 @@
-import Directory from "../models/directoryModel.js";
-import File from "../models/fileModel.js";
 import User from "../models/userModel.js";
-import { deleteR2Files, deleteProfilePicture, getProfilePictureKeyFromURL, isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
+import File from "../models/fileModel.js";
+import Directory from "../models/directoryModel.js";
+import { ROLE_LEVELS } from "../utils/roles.js";
 import { getTargetUser } from "../utils/getTargetUser.js";
 import { canAssignRole } from "../utils/permissions.js";
-import { roleSchema, userStatusSchema } from "../validators/authSchema.js";
-import { deleteUserSessions, searchAllSessions } from "../utils/sessionUtils.js";
 import { cancelUserSubscriptions } from "../services/subscriptionCleanup.js";
+import { roleSchema, userStatusSchema } from "../validators/authSchema.js";
+import { deleteUserSessions, getActiveSessionUserIds } from "../utils/sessionUtils.js";
+import { buildPagination, escapeRegex, parsePagination, parseSearch } from "../utils/pagination.js";
+import { deleteR2Files, deleteProfilePicture, getProfilePictureKeyFromURL, isOwnedProfilePictureURL } from "../services/cloudflareR2Service.js";
 
 export const getAllUsers = async (req, res) => {
-    const allUsers = await User.find()
+    const role = req.query.role || undefined; // "" = no filter
+    if (role && role !== "all" && !Object.hasOwn(ROLE_LEVELS, role)) {
+        return res.status(400).json({ error: "Invalid role filter!" });
+    };
+
+    const { page, limit } = parsePagination(req.query);
+    const search = parseSearch(req.query.search);
+
+    // Filters are applied before pagination, and the count uses the same filter.
+    const filter = {};
+    if (role && role !== "all") filter.role = role;
+    if (search) {
+        const pattern = { $regex: escapeRegex(search), $options: "i" };
+        filter.$or = [{ name: pattern }, { email: pattern }];
+    }
+
+    const totalItems = await User.countDocuments(filter);
+    const pagination = buildPagination({ page, limit, totalItems });
+
+    // Nothing matches: no page to fetch and no sessions to look up.
+    if (totalItems === 0) {
+        return res.status(200).json({ users: [], pagination });
+    }
+
+    const pageUsers = await User.find(filter)
         .select("name email role isDeleted picture maxStorageInBytes usedStorageInBytes")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((pagination.currentPage - 1) * limit)
+        .limit(limit)
         .lean();
 
-    // all active redis sessions
-    const allSessions = await searchAllSessions("*", { RETURN: ["userId"] });
-    const loggedInUsers = new Set(
-        allSessions.documents.map(
-            (doc) => doc.value.userId.toString()
-        )
+    // Only look up sessions for users on the current page.
+    const loggedInUsers = await getActiveSessionUserIds(
+        pageUsers.map(({ _id }) => _id)
     );
 
-    const transformedUsers = allUsers.map(
-        ({ _id, name, email, role, isDeleted, picture, maxStorageInBytes, usedStorageInBytes }) => ({
-            id: _id,
-            name,
-            email,
-            role,
-            isDeleted,
-            picture,
-            maxStorageInBytes,
-            usedStorageInBytes,
-            isLoggedIn: loggedInUsers.has(_id.toString()),
-        })
-    );
-    return res.status(200).json(transformedUsers);
+    const users = pageUsers.map(({ _id, name, email, role, isDeleted, picture, maxStorageInBytes, usedStorageInBytes, }) => ({
+        id: _id,
+        name,
+        email,
+        role,
+        isDeleted,
+        picture,
+        maxStorageInBytes,
+        usedStorageInBytes,
+        isLoggedIn: loggedInUsers.has(_id.toString()),
+    }));
+
+    return res.status(200).json({
+        users,
+        pagination,
+    });
+};
+
+export const getUserStats = async (req, res) => {
+    const [[counts], loggedInUsers] = await Promise.all([
+        User.aggregate([
+            {
+                $group: {
+                    _id: null,
+                    total: { $sum: 1 },
+                    admins: { $sum: { $cond: [{ $eq: ["$role", "Admin"] }, 1, 0] } },
+                    deleted: { $sum: { $cond: ["$isDeleted", 1, 0] } },
+                },
+            },
+        ]),
+        getActiveSessionUserIds(),
+    ]);
+
+    // "Online" = has an active session and is not deactivated.
+    const active = loggedInUsers.size
+        ? await User.countDocuments({ _id: { $in: [...loggedInUsers] }, isDeleted: { $ne: true } })
+        : 0;
+
+    return res.status(200).json({
+        total: counts?.total ?? 0,
+        active,
+        admins: counts?.admins ?? 0,
+        deleted: counts?.deleted ?? 0,
+    });
 };
 
 export const revokeUserSessions = async (req, res) => {

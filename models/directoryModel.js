@@ -33,8 +33,13 @@ const directorySchema = new Schema(
   },
 );
 
-directorySchema.index({ userId: 1 });
 directorySchema.index({ parentDirId: 1 });
+directorySchema.index({
+  userId: 1,
+  parentDirId: 1,
+  createdAt: -1,
+  _id: -1,
+});
 
 const Directory = model("Directory", directorySchema);
 
