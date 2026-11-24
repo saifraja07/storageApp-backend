@@ -2,11 +2,13 @@ import express from "express";
 import { requireRole } from "../middleWares/authMiddleware.js";
 import { rateLimiter } from "../middleWares/limiterMiddleware.js";
 import { getPlansDashboard, getStorageUsage, refreshStorageUsage } from "../controllers/adminDashboardController.js";
-import { getAllUsers, permanentlyDeleteUser, revokeUserSessions, updateUserRole, updateUserStatus } from "../controllers/adminController.js";
+import { getAllUsers, getUserStats, permanentlyDeleteUser, revokeUserSessions, updateUserRole, updateUserStatus } from "../controllers/adminController.js";
 
 const router = express.Router();
 
 router.get("/users", requireRole("Manager"), getAllUsers);
+
+router.get("/users/stats", requireRole("Manager"), getUserStats);
 
 router.get("/dashboard/plans", requireRole("Manager"), getPlansDashboard);
 

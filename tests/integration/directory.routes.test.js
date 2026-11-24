@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { loadApp, loginAs, request } from "../helpers/app.js";
 import { UserMock, FileMock, DirectoryMock } from "../helpers/modelMocks.js";
-import { query } from "../helpers/query.js";
+import { query, spyQuery } from "../helpers/query.js";
 import { oid } from "../helpers/fixtures.js";
 import { deleteR2Files } from "../../services/cloudflareR2Service.js";
 import { Types } from "mongoose";
@@ -34,8 +34,10 @@ describe("GET /directories/:directoryId?", () => {
     const { cookie, user } = loginAs();
     const dir = { _id: user.rootDirId, name: "root", userId: user._id };
     DirectoryMock.findOne.mockReturnValue(query(dir));
-    FileMock.find.mockReturnValue(query([{ _id: oid(), name: "a.txt" }]));
-    DirectoryMock.find.mockReturnValue(query([{ _id: oid(), name: "Docs" }]));
+    FileMock.find.mockReturnValue(spyQuery([{ _id: oid(), name: "a.txt" }]));
+    DirectoryMock.find.mockReturnValue(spyQuery([{ _id: oid(), name: "Docs" }]));
+    DirectoryMock.countDocuments.mockResolvedValue(1);
+    FileMock.countDocuments.mockResolvedValue(1);
 
     const res = await request(app).get("/directories").set("Cookie", cookie).expect(200);
 
@@ -53,6 +55,164 @@ describe("GET /directories/:directoryId?", () => {
     expect(DirectoryMock.findOne).toHaveBeenCalledWith({ _id: VALID_ID, userId: user._id });
     expect(FileMock.find).not.toHaveBeenCalled();
   });
+});
+
+describe("GET /directories/:directoryId? (paginated)", () => {
+  const items = (n, prefix) => Array.from({ length: n }, (_, i) => ({ _id: oid(), name: `${prefix}${i}` }));
+
+  /** Sets up an owned directory with `dirs` matching folders and `files` matching files. */
+  function setup({ dirs, files, dirRows = items(dirs, "d"), fileRows = items(files, "f") }) {
+    const { cookie, user } = loginAs();
+    DirectoryMock.findOne.mockReturnValue(query({ _id: user.rootDirId, name: "root", userId: user._id }));
+    DirectoryMock.countDocuments.mockResolvedValue(dirs);
+    FileMock.countDocuments.mockResolvedValue(files);
+    const dirFind = spyQuery(dirRows);
+    const fileFind = spyQuery(fileRows);
+    DirectoryMock.find.mockReturnValue(dirFind);
+    FileMock.find.mockReturnValue(fileFind);
+    return { cookie, user, dirFind, fileFind };
+  }
+
+  it("counts both collections with the owner + parent (+ search) filter", async () => {
+    const { cookie, user } = setup({ dirs: 0, files: 0 });
+    await request(app).get("/directories?page=1&limit=24&search=a.c").set("Cookie", cookie).expect(200);
+    const filter = {
+      parentDirId: user.rootDirId,
+      userId: user._id,
+      name: { $regex: "a\\.c", $options: "i" },
+    };
+    expect(DirectoryMock.countDocuments).toHaveBeenCalledWith(filter);
+    // files additionally skip unfinished uploads
+    expect(FileMock.countDocuments).toHaveBeenCalledWith({ ...filter, isUploading: { $ne: true } });
+  });
+
+  it("leaves unfinished uploads out of the file list query", async () => {
+    const { cookie, user, fileFind } = setup({ dirs: 0, files: 3 });
+    await request(app).get("/directories?page=1&limit=24").set("Cookie", cookie).expect(200);
+    expect(FileMock.find).toHaveBeenCalledWith({
+      parentDirId: user.rootDirId,
+      userId: user._id,
+      isUploading: { $ne: true },
+    });
+    expect(DirectoryMock.find).not.toHaveBeenCalled();
+    expect(fileFind.limit).toHaveBeenCalledWith(3);
+  });
+
+  it("page 1 of 30 folders + 45 files is 24 folders and no files query", async () => {
+    const { cookie, dirFind, fileFind } = setup({ dirs: 30, files: 45, dirRows: items(24, "d") });
+    const res = await request(app).get("/directories?page=1&limit=24").set("Cookie", cookie).expect(200);
+    expect(res.body.directories).toHaveLength(24);
+    expect(res.body.files).toEqual([]);
+    expect(dirFind.skip).toHaveBeenCalledWith(0);
+    expect(dirFind.limit).toHaveBeenCalledWith(24);
+    expect(FileMock.find).not.toHaveBeenCalled(); // limit(0) would mean "no limit" — must not be issued
+    expect(fileFind.limit).not.toHaveBeenCalled();
+    expect(res.body.pagination).toMatchObject({ currentPage: 1, totalPages: 4, totalItems: 75 });
+  });
+
+  it("page 2 straddles the folder/file boundary: last 6 folders then the first 18 files", async () => {
+    const { cookie, dirFind, fileFind } = setup({ dirs: 30, files: 45, dirRows: items(6, "d"), fileRows: items(18, "f") });
+    const res = await request(app).get("/directories?page=2&limit=24").set("Cookie", cookie).expect(200);
+    expect(dirFind.skip).toHaveBeenCalledWith(24);
+    expect(dirFind.limit).toHaveBeenCalledWith(6);
+    expect(fileFind.skip).toHaveBeenCalledWith(0);
+    expect(fileFind.limit).toHaveBeenCalledWith(18);
+    expect(res.body.directories).toHaveLength(6);
+    expect(res.body.files).toHaveLength(18);
+  });
+
+  it("page 3 is files only, offset by the folder count", async () => {
+    const { cookie, fileFind } = setup({ dirs: 30, files: 45, dirRows: [], fileRows: items(24, "f") });
+    const res = await request(app).get("/directories?page=3&limit=24").set("Cookie", cookie).expect(200);
+    expect(DirectoryMock.find).not.toHaveBeenCalled();
+    expect(fileFind.skip).toHaveBeenCalledWith(18);
+    expect(fileFind.limit).toHaveBeenCalledWith(24);
+    expect(res.body.pagination).toMatchObject({ currentPage: 3, hasNextPage: true, hasPrevPage: true });
+  });
+
+  it("keeps the response fields the frontend relies on (id alias, directory fields, spread of the directory)", async () => {
+    const { cookie } = setup({ dirs: 1, files: 1 });
+    const res = await request(app).get("/directories?page=1&limit=24").set("Cookie", cookie).expect(200);
+    expect(res.body).toMatchObject({ name: "root" });
+    expect(res.body.files[0]).toHaveProperty("id");
+    expect(res.body.directories[0]).toHaveProperty("id");
+  });
+
+  it("an empty directory returns empty lists and one page without querying either collection", async () => {
+    const { cookie } = setup({ dirs: 0, files: 0 });
+    const res = await request(app).get("/directories?page=1&limit=24").set("Cookie", cookie).expect(200);
+    expect(res.body.files).toEqual([]);
+    expect(res.body.directories).toEqual([]);
+    expect(res.body.pagination).toMatchObject({ totalItems: 0, totalPages: 1 });
+    expect(DirectoryMock.find).not.toHaveBeenCalled();
+    expect(FileMock.find).not.toHaveBeenCalled();
+  });
+
+  it("clamps a page past the end to the last page", async () => {
+    const { cookie, fileFind } = setup({ dirs: 0, files: 26 });
+    const res = await request(app).get("/directories?page=9&limit=24").set("Cookie", cookie).expect(200);
+    expect(res.body.pagination).toMatchObject({ currentPage: 2, totalPages: 2 });
+    expect(fileFind.skip).toHaveBeenCalledWith(24);
+  });
+
+  it("returns 404 (and reads no items) for a directory the user doesn't own", async () => {
+    const { cookie } = setup({ dirs: 5, files: 5 });
+    DirectoryMock.findOne.mockReturnValue(query(null));
+    const res = await request(app).get(`/directories/${VALID_ID}?page=1&limit=24`).set("Cookie", cookie).expect(404);
+    expect(res.body.error).toMatch(/not found or you do not have access/i);
+    expect(DirectoryMock.find).not.toHaveBeenCalled();
+    expect(FileMock.find).not.toHaveBeenCalled();
+  });
+
+  it("default order is newest first with a unique tiebreaker, and needs no collation", async () => {
+    const { cookie, dirFind, fileFind } = setup({ dirs: 1, files: 1 });
+    await request(app).get("/directories?page=1&limit=24").set("Cookie", cookie).expect(200);
+    expect(dirFind.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
+    expect(fileFind.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
+    expect(dirFind.collation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["name", "asc", { name: 1, _id: -1 }, { name: 1, _id: -1 }, true, true],
+    ["name", "desc", { name: -1, _id: -1 }, { name: -1, _id: -1 }, true, true],
+    ["date", "desc", { updatedAt: -1, _id: -1 }, { updatedAt: -1, _id: -1 }, false, false],
+    ["size", "asc", { size: 1, _id: -1 }, { size: 1, _id: -1 }, false, false],
+    // directories have no extension: "type" leaves them in the default order
+    ["type", "asc", { createdAt: -1, _id: -1 }, { extension: 1, _id: -1 }, false, true],
+  ])("sortBy=%s&sortDir=%s", async (sortBy, sortDir, dirSort, fileSort, dirCollated, fileCollated) => {
+    const { cookie, dirFind, fileFind } = setup({ dirs: 1, files: 1 });
+    await request(app).get(`/directories?page=1&limit=24&sortBy=${sortBy}&sortDir=${sortDir}`).set("Cookie", cookie).expect(200);
+    expect(dirFind.sort).toHaveBeenCalledWith(dirSort);
+    expect(fileFind.sort).toHaveBeenCalledWith(fileSort);
+    expect(dirFind.collation.mock.calls.length > 0).toBe(dirCollated);
+    expect(fileFind.collation.mock.calls.length > 0).toBe(fileCollated);
+  });
+
+  it.each(["password", "constructor", "__proto__", "createdAt"])("rejects sortBy=%s", async (sortBy) => {
+    const { cookie } = setup({ dirs: 1, files: 1 });
+    await request(app).get(`/directories?page=1&limit=24&sortBy=${sortBy}`).set("Cookie", cookie).expect(400);
+    expect(FileMock.find).not.toHaveBeenCalled();
+  });
+
+  it.each(["up", "ASC", "toString", "1"])("rejects sortDir=%s", async (sortDir) => {
+    const { cookie } = setup({ dirs: 1, files: 1 });
+    await request(app).get(`/directories?page=1&limit=24&sortBy=name&sortDir=${sortDir}`).set("Cookie", cookie).expect(400);
+  });
+
+  it("treats empty sortBy/sortDir values as not set", async () => {
+    const { cookie, dirFind } = setup({ dirs: 1, files: 1 });
+    await request(app).get("/directories?page=1&limit=24&sortBy=&sortDir=").set("Cookie", cookie).expect(200);
+    expect(dirFind.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
+  });
+
+  it("never lets a client pick an arbitrary page size", async () => {
+    const { cookie, fileFind } = setup({ dirs: 0, files: 500 });
+    const res = await request(app).get("/directories?page=1&limit=100000").set("Cookie", cookie).expect(200);
+    expect(res.body.pagination.limit).toBe(24);
+    expect(fileFind.limit).toHaveBeenCalledWith(24);
+  });
+
+
 });
 
 describe("GET /directories/:directoryId/path", () => {

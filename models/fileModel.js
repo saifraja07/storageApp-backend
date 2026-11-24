@@ -34,10 +34,15 @@ const fileSchema = new Schema(
   },
 );
 
-fileSchema.index({ userId: 1 });
 fileSchema.index({ parentDirId: 1 });
 fileSchema.index({ isUploading: 1 });
 fileSchema.index({ createdAt: 1 });
+fileSchema.index({
+  userId: 1,
+  parentDirId: 1,
+  createdAt: -1,
+  _id: -1,
+});
 
 const File = model("File", fileSchema);
 

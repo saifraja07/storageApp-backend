@@ -3,7 +3,7 @@ import { loadApp, request } from "../helpers/app.js";
 import { redisMock } from "../helpers/redisMock.js";
 import { UserMock, FileMock, DirectoryMock, SubscriptionMock, PaymentMock } from "../helpers/modelMocks.js";
 import { istMonthKey } from "../../services/revenueService.js";
-import { query } from "../helpers/query.js";
+import { query, spyQuery } from "../helpers/query.js";
 import { makeUser, oid, signedSidCookie } from "../helpers/fixtures.js";
 import { deleteR2Files } from "../../services/cloudflareR2Service.js";
 
@@ -60,6 +60,7 @@ describe("role requirements", () => {
   const matrix = [
     // [method, path, minimum role]
     ["get", "/admin/users", "Manager"],
+    ["get", "/admin/users/stats", "Manager"],
     ["get", "/admin/dashboard/plans", "Manager"],
     ["get", "/admin/dashboard/storage/usage", "Admin"],
     ["post", "/admin/dashboard/storage/usage/refresh", "Admin"],
@@ -82,11 +83,12 @@ describe("role requirements", () => {
 });
 
 describe("GET /admin/users", () => {
-  it("lists users with their online status, for managers", async () => {
+  it("lists the first page of users with their online status, for managers", async () => {
     const { cookie } = actAs("Manager");
     const online = makeUser({ name: "Online" });
     const offline = makeUser({ name: "Offline" });
-    UserMock.find.mockReturnValue(query([online, offline]));
+    UserMock.countDocuments.mockResolvedValue(2);
+    UserMock.find.mockReturnValue(spyQuery([online, offline]));
     redisMock.ft.search.mockResolvedValue({
       total: 1,
       documents: [{ id: "session:a", value: { userId: String(online._id) } }],
@@ -94,10 +96,169 @@ describe("GET /admin/users", () => {
 
     const res = await request(app).get("/admin/users").set("Cookie", cookie).expect(200);
 
-    const byName = Object.fromEntries(res.body.map((u) => [u.name, u]));
+    const byName = Object.fromEntries(res.body.users.map((u) => [u.name, u]));
     expect(byName.Online.isLoggedIn).toBe(true);
     expect(byName.Offline.isLoggedIn).toBe(false);
-    expect(res.body[0]).not.toHaveProperty("password");
+    expect(res.body.users[0]).not.toHaveProperty("password");
+    expect(res.body.pagination).toMatchObject({ currentPage: 1, totalPages: 1, totalItems: 2, limit: 24 });
+  });
+});
+
+describe("GET /admin/users (paginated)", () => {
+  const rows = (n) => Array.from({ length: n }, (_, i) => makeUser({ name: `User ${i}` }));
+
+  it("returns one page of users plus pagination metadata", async () => {
+    const { cookie } = actAs("Manager");
+    const pageUsers = rows(24);
+    UserMock.countDocuments.mockResolvedValue(87);
+    const find = spyQuery(pageUsers);
+    UserMock.find.mockReturnValue(find);
+
+    const res = await request(app).get("/admin/users?page=2&limit=24").set("Cookie", cookie).expect(200);
+
+    expect(res.body.users).toHaveLength(24);
+    expect(res.body.users[0]).toHaveProperty("id");
+    expect(res.body.users[0]).not.toHaveProperty("password");
+    expect(res.body.pagination).toEqual({
+      currentPage: 2, totalPages: 4, totalItems: 87, limit: 24, hasNextPage: true, hasPrevPage: true,
+    });
+    // deterministic newest-first order, with the right window
+    expect(find.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
+    expect(find.skip).toHaveBeenCalledWith(24);
+    expect(find.limit).toHaveBeenCalledWith(24);
+  });
+
+  it("counts with exactly the same filter it queries with (search + role)", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(0);
+    UserMock.find.mockReturnValue(spyQuery([]));
+
+    await request(app).get("/admin/users?page=1&limit=24&search=sa.if&role=Admin").set("Cookie", cookie).expect(200);
+
+    const expected = {
+      role: "Admin",
+      $or: [
+        { name: { $regex: "sa\\.if", $options: "i" } },
+        { email: { $regex: "sa\\.if", $options: "i" } },
+      ],
+    };
+    expect(UserMock.countDocuments).toHaveBeenCalledWith(expected);
+    expect(UserMock.find).not.toHaveBeenCalled(); // 0 matches → nothing to fetch
+  });
+
+  it("applies the same filter to find()", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(3);
+    UserMock.find.mockReturnValue(spyQuery(rows(3)));
+    await request(app).get("/admin/users?page=1&limit=24&role=Manager").set("Cookie", cookie).expect(200);
+    expect(UserMock.find).toHaveBeenCalledWith(UserMock.countDocuments.mock.calls[0][0]);
+    expect(UserMock.find).toHaveBeenCalledWith({ role: "Manager" });
+  });
+
+  it("role=all means no role filter", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(1);
+    UserMock.find.mockReturnValue(spyQuery(rows(1)));
+    await request(app).get("/admin/users?page=1&limit=24&role=all").set("Cookie", cookie).expect(200);
+    expect(UserMock.countDocuments).toHaveBeenCalledWith({});
+  });
+
+  it("only looks up sessions for the users on the page", async () => {
+    const { cookie } = actAs("Manager");
+    const online = makeUser({ name: "Online" });
+    const offline = makeUser({ name: "Offline" });
+    UserMock.countDocuments.mockResolvedValue(2);
+    UserMock.find.mockReturnValue(spyQuery([online, offline]));
+    redisMock.ft.search.mockResolvedValue({
+      total: 1,
+      documents: [{ id: "session:a", value: { userId: String(online._id) } }],
+    });
+
+    const res = await request(app).get("/admin/users?page=1&limit=24").set("Cookie", cookie).expect(200);
+
+    expect(res.body.users.find((u) => u.name === "Online").isLoggedIn).toBe(true);
+    expect(res.body.users.find((u) => u.name === "Offline").isLoggedIn).toBe(false);
+    expect(redisMock.ft.search.mock.calls[0][1]).toBe(`@userId:{${online._id}|${offline._id}}`);
+  });
+
+  it("skips Redis entirely for an empty result", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(0);
+    const res = await request(app).get("/admin/users?page=1&limit=24&search=nobody").set("Cookie", cookie).expect(200);
+    expect(res.body).toEqual({
+      users: [],
+      pagination: { currentPage: 1, totalPages: 1, totalItems: 0, limit: 24, hasNextPage: false, hasPrevPage: false },
+    });
+    expect(redisMock.ft.search).not.toHaveBeenCalled();
+  });
+
+  it("clamps a page beyond the end to the last page (e.g. after deleting the last user)", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(26);
+    const find = spyQuery(rows(1));
+    UserMock.find.mockReturnValue(find);
+    const res = await request(app).get("/admin/users?page=3&limit=24").set("Cookie", cookie).expect(200);
+    expect(res.body.pagination).toMatchObject({ currentPage: 2, totalPages: 2 });
+    expect(find.skip).toHaveBeenCalledWith(24);
+  });
+
+  it("never lets a client pick an arbitrary page size or page", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(500);
+    const find = spyQuery(rows(1));
+    UserMock.find.mockReturnValue(find);
+    const res = await request(app).get("/admin/users?page=-5&limit=100000").set("Cookie", cookie).expect(200);
+    expect(res.body.pagination).toMatchObject({ currentPage: 1, limit: 24 });
+    expect(find.limit).toHaveBeenCalledWith(24);
+    expect(find.skip).toHaveBeenCalledWith(0);
+  });
+
+  it("treats an empty role value as no filter", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(0);
+    await request(app).get("/admin/users?page=1&limit=24&role=").set("Cookie", cookie).expect(200);
+    expect(UserMock.countDocuments).toHaveBeenCalledWith({});
+  });
+
+  it("rejects an unknown role filter", async () => {
+    const { cookie } = actAs("Manager");
+    const res = await request(app).get("/admin/users?page=1&limit=24&role=Root").set("Cookie", cookie).expect(400);
+    expect(res.body.error).toMatch(/role/i);
+    expect(UserMock.countDocuments).not.toHaveBeenCalled();
+  });
+
+  it("treats operator-looking search input as plain text", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.countDocuments.mockResolvedValue(0);
+    await request(app).get("/admin/users?page=1&limit=24&search[$ne]=x").set("Cookie", cookie).expect(200);
+    expect(UserMock.countDocuments).toHaveBeenCalledWith({});
+  });
+});
+
+describe("GET /admin/users/stats", () => {
+  it("returns GLOBAL counts, independent of any page or filter", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.aggregate.mockResolvedValue([{ _id: null, total: 87, admins: 4, deleted: 9 }]);
+    UserMock.countDocuments.mockResolvedValue(5);
+    redisMock.ft.search.mockResolvedValue({
+      total: 6,
+      documents: Array.from({ length: 6 }, () => ({ id: "session:s", value: { userId: String(oid()) } })),
+    });
+
+    const res = await request(app).get("/admin/users/stats").set("Cookie", cookie).expect(200);
+
+    expect(res.body).toEqual({ total: 87, active: 5, admins: 4, deleted: 9 });
+    expect(redisMock.ft.search.mock.calls[0][1]).toBe("*");
+    // "online" excludes deactivated users
+    expect(UserMock.countDocuments.mock.calls[0][0]).toMatchObject({ isDeleted: { $ne: true } });
+  });
+
+  it("is all zeros with no users and no sessions (and skips the online count)", async () => {
+    const { cookie } = actAs("Manager");
+    UserMock.aggregate.mockResolvedValue([]);
+    const res = await request(app).get("/admin/users/stats").set("Cookie", cookie).expect(200);
+    expect(res.body).toEqual({ total: 0, active: 0, admins: 0, deleted: 0 });
+    expect(UserMock.countDocuments).not.toHaveBeenCalled();
   });
 });
 

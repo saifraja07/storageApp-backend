@@ -77,3 +77,26 @@ export async function deleteUserSessions(userId, { exceptSessionId } = {}) {
     await redisClient.del(...sessionKeys);
   }
 }
+
+/**
+ * Returns user IDs that have active Redis sessions.
+ * When userIds are provided, only checks those users.
+ * When omitted, checks all active sessions.
+ */
+export async function getActiveSessionUserIds(userIds) {
+  if (userIds && userIds.length === 0) {
+    return new Set();
+  };
+
+  const query = userIds
+    ? `@userId:{${userIds.join("|")}}`
+    : "*";
+
+  const sessions = await searchAllSessions(query, {
+    RETURN: ["userId"],
+  });
+
+  return new Set(
+    sessions.documents.map(({ value }) => value.userId.toString())
+  );
+}
